@@ -1,0 +1,147 @@
+[project]
+name = "seroverse"
+dynamic = ["version"]
+keywords = ["bioinformatics", "genomics", "serotyping", "microbiology"]
+license = { file = "LICENSE" }
+description = "Core data structures, graph algorithms, and async database clients for the SeroVerse ecosystem"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [
+    { name = "Tom Stanton", email = "tomdstanton@gmail.com" }
+]
+requires-python = ">=3.13"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=2.4",
+]
+
+[project.optional-dependencies]
+core = [
+    "scipy>=1.18.0",
+    "numba>=0.68.0",
+]
+client = [
+    "aiohttp>=3.14.0",
+    "msgspec>=0.20.0",
+]
+all = ["seroverse[core,client]"]
+
+[dependency-groups]
+docs = [
+    "seroverse[all]",
+    "zensical>=0.0.46",
+    "mkdocstrings[python]",
+    "marimo>=0.25.1",
+    "zenzic>=0.30.0; python_version < '3.14'",
+]
+test = [
+    "seroverse[all]",
+    "pytest>=8.0.0",
+    "pytest-testmon>=2.1.0",
+    "pytest-xdist",
+    "pytest-cov>=7.1.0",
+    "cassetter>=0.1.0",
+]
+typing = [
+    "seroverse[all]",
+    "ty",
+]
+lint = [
+    "ruff",
+    "pre-commit",
+]
+dev = [
+    { include-group = "docs" },
+    { include-group = "test" },
+    { include-group = "typing" },
+    { include-group = "lint" },
+]
+
+[project.urls]
+Homepage = "https://SeroVerse.github.io/SeroVerse/"
+Repository = "https://github.com/SeroVerse/SeroVerse"
+Documentation = "https://SeroVerse.github.io/SeroVerse/"
+"Bug Tracker" = "https://github.com/SeroVerse/SeroVerse/issues"
+Changelog = "https://github.com/SeroVerse/SeroVerse/blob/master/CHANGELOG.md"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling", "hatch-vcs"]
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/seroverse/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/seroverse"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 120
+force-exclude = true
+exclude = [
+    ".agents",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "src/seroverse/_version.py",
+]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+]
+extend-select = ["ANN", "PYI"]
+ignore = [
+    "ANN401",
+    "E501",
+]
+preview = true
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["ANN", "B018"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.rules]
+missing-type-argument = "error"
+possibly-unresolved-reference = "warn"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+norecursedirs = [".venv", "dist", "build", ".agy", ".git", ".ruff_cache"]
+addopts = "-q --tb=short --show-capture=no --cov=src --cov-report=term-missing --cov-branch -n 0"

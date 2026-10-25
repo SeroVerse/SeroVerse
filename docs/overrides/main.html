@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+
+{% set site_lower = (config.site_name | d("SeroVerse")) | lower %}
+{% if "seroref" in site_lower %}
+  {% set sv_pillar = "seroref" %}
+{% elif "kbank" in site_lower %}
+  {% set sv_pillar = "kbank" %}
+{% elif "serogen" in site_lower %}
+  {% set sv_pillar = "serogen" %}
+{% elif "seroepi" in site_lower %}
+  {% set sv_pillar = "seroepi" %}
+{% else %}
+  {% set sv_pillar = "seroverse" %}
+{% endif %}
+
+{% block htmltitle %}
+  {% if page.meta and page.meta.title %}
+    {% if page.meta.title != config.site_name %}
+      <title>{{ page.meta.title }} - {{ config.site_name }}</title>
+    {% else %}
+      <title>{{ config.site_name }}</title>
+    {% endif %}
+  {% elif page.title and not page.is_homepage and page.title != config.site_name %}
+    <title>{{ page.title | striptags }} - {{ config.site_name }}</title>
+  {% else %}
+    <title>{{ config.site_name }}</title>
+  {% endif %}
+{% endblock %}
+
+{% block extrahead %}
+  {{ super() }}
+  <script>document.documentElement.setAttribute("data-sv-pillar", "{{ sv_pillar }}");</script>
+{% endblock %}
+
+{%- block announce -%}{%- include "announcement.html" ignore missing -%}{%- endblock -%}
+
+{% block header %}
+  {% set class = "md-header" %}
+  {% if "navigation.tabs.sticky" in features %}
+    {% set class = class ~ " md-header--shadow md-header--lifted" %}
+  {% elif "navigation.tabs" not in features %}
+    {% set class = class ~ " md-header--shadow" %}
+  {% endif %}
+  <header class="{{ class }}" data-md-component="header">
+    <nav class="md-header__inner md-grid" aria-label="{{ lang.t('header') }}">
+      <a href="{{ config.extra.homepage | d(nav.homepage.url, true) | url }}" title="{{ config.site_name | e }}" class="md-header__button md-logo" aria-label="{{ config.site_name }}" data-md-component="logo">
+        {% include "partials/logo.html" %}
+      </a>
+      <label class="md-header__button md-icon" for="__drawer" aria-label="{{ lang.t('nav') }}">
+        {% set icon = config.theme.icon.menu or "material/menu" %}
+        {% include ".icons/" ~ icon ~ ".svg" %}
+      </label>
+      <div class="md-header__title" data-md-component="header-title">
+        <div class="md-header__ellipsis">
+          <div class="md-header__topic">
+            <span class="md-ellipsis">
+              {{ config.site_name }}
+            </span>
+          </div>
+          <div class="md-header__topic" data-md-component="header-topic">
+            <span class="md-ellipsis">
+              {% if page.meta and page.meta.title %}
+                {{ page.meta.title }}
+              {% else %}
+                {{ page.title }}
+              {% endif %}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="sv-eco-links" aria-label="SeroVerse Ecosystem">
+        <a href="https://seroverse.github.io/SeroVerse/" class="sv-eco-pill sv-eco-pill--seroverse {% if sv_pillar == 'seroverse' %}is-active{% endif %}">
+          {% include ".icons/lucide/orbit.svg" %}
+          <span>Home</span>
+        </a>
+        <a href="https://seroverse.github.io/SeroRef/" class="sv-eco-pill sv-eco-pill--seroref {% if sv_pillar == 'seroref' %}is-active{% endif %}">
+          {% include ".icons/lucide/dna.svg" %}
+          <span>SeroRef</span>
+        </a>
+        <a href="https://seroverse.github.io/KBank/" class="sv-eco-pill sv-eco-pill--kbank {% if sv_pillar == 'kbank' %}is-active{% endif %}">
+          {% include ".icons/lucide/hexagon.svg" %}
+          <span>KBank</span>
+        </a>
+        <a href="https://seroverse.github.io/SeroGen/" class="sv-eco-pill sv-eco-pill--serogen {% if sv_pillar == 'serogen' %}is-active{% endif %}">
+          {% include ".icons/lucide/waypoints.svg" %}
+          <span>SeroGen</span>
+        </a>
+        <a href="https://seroverse.github.io/SeroEpi/" class="sv-eco-pill sv-eco-pill--seroepi {% if sv_pillar == 'seroepi' %}is-active{% endif %}">
+          {% include ".icons/lucide/chart-network.svg" %}
+          <span>SeroEpi</span>
+        </a>
+      </div>
+      {% if config.theme.palette %}
+        {% if not config.theme.palette is mapping %}
+          {% include "partials/palette.html" %}
+        {% endif %}
+      {% endif %}
+      {% if not config.theme.palette is mapping %}
+        {% include "partials/javascripts/palette.html" %}
+      {% endif %}
+      {% if config.extra.alternate %}
+        {% include "partials/alternate.html" %}
+      {% endif %}
+      {% if "search" in config.plugins %}
+        {% set search = config.plugins["search"] | attr("config") %}
+        {% if search.enabled %}
+          <label class="md-header__button md-icon" for="__search" aria-label="{{ lang.t('search') }}">
+            {% set icon = config.theme.icon.search or "material/magnify" %}
+            {% include ".icons/" ~ icon ~ ".svg" %}
+          </label>
+          {% include "partials/search.html" %}
+        {% endif %}
+      {% endif %}
+      <div class="md-header__source">
+        {% if config.repo_url %}
+          {% include "partials/source.html" %}
+        {% endif %}
+      </div>
+    </nav>
+    {% if "navigation.tabs.sticky" in features %}
+      {% if "navigation.tabs" in features %}
+        {% include "partials/tabs.html" %}
+      {% endif %}
+    {% endif %}
+  </header>
+{% endblock %}
+
+{% block footer %}
+  <footer class="md-footer">
+    {% if "navigation.footer" in features %}
+      {% if page.previous_page or page.next_page %}
+        {% if page.meta and page.meta.hide %}
+          {% set hidden = "hidden" if "footer" in page.meta.hide %}
+        {% endif %}
+        <nav class="md-footer__inner md-grid" aria-label="{{ lang.t('footer') }}" {{ hidden }}>
+          {% if page.previous_page %}
+            {% set direction = lang.t("footer.previous") %}
+            <a href="{{ page.previous_page.url | url }}" class="md-footer__link md-footer__link--prev" aria-label="{{ direction }}: {{ page.previous_page.title | e }}">
+              <div class="md-footer__button md-icon">
+                {% set icon = config.theme.icon.previous or "material/arrow-left" %}
+                {% include ".icons/" ~ icon ~ ".svg" %}
+              </div>
+              <div class="md-footer__title">
+                <span class="md-footer__direction">{{ direction }}</span>
+                <div class="md-ellipsis">{{ page.previous_page.title }}</div>
+              </div>
+            </a>
+          {% endif %}
+          {% if page.next_page %}
+            {% set direction = lang.t("footer.next") %}
+            <a href="{{ page.next_page.url | url }}" class="md-footer__link md-footer__link--next" aria-label="{{ direction }}: {{ page.next_page.title | e }}">
+              <div class="md-footer__title">
+                <span class="md-footer__direction">{{ direction }}</span>
+                <div class="md-ellipsis">{{ page.next_page.title }}</div>
+              </div>
+              <div class="md-footer__button md-icon">
+                {% set icon = config.theme.icon.next or "material/arrow-right" %}
+                {% include ".icons/" ~ icon ~ ".svg" %}
+              </div>
+            </a>
+          {% endif %}
+        </nav>
+      {% endif %}
+    {% endif %}
+
+    <div class="sv-footer-ecosystem">
+      <div class="sv-footer-grid md-grid md-typeset">
+        <div class="sv-footer-col">
+          <a href="https://seroverse.github.io/SeroVerse/" class="sv-footer-brand">
+            {% include ".icons/lucide/orbit.svg" %}
+            <span>SeroVerse</span>
+          </a>
+          <p class="sv-footer-tagline">
+            Unified computational ecosystem for bacterial surface polysaccharide genomics, structural glycomics, and Bayesian sero-epidemiology.
+          </p>
+        </div>
+        <div class="sv-footer-col">
+          <h4>Documentation</h4>
+          <ul class="sv-footer-list">
+            <li><a href="https://seroverse.github.io/SeroVerse/">SeroVerse — Home &amp; Core</a></li>
+            <li><a href="https://seroverse.github.io/SeroRef/">SeroRef — Genomic Loci</a></li>
+            <li><a href="https://seroverse.github.io/KBank/">KBank — Glycan Database</a></li>
+            <li><a href="https://seroverse.github.io/SeroGen/">SeroGen — Geno-Glycomics</a></li>
+            <li><a href="https://seroverse.github.io/SeroEpi/">SeroEpi — Epidemiology</a></li>
+          </ul>
+        </div>
+        <div class="sv-footer-col">
+          <h4>API &amp; Interactive</h4>
+          <ul class="sv-footer-list">
+            <li><a href="https://tomdstanton-seroepi.share.connect.posit.cloud" target="_blank" rel="noopener">SeroEpi Live Web App ↗</a></li>
+            <li><a href="https://seroverse.github.io/SeroVerse/reference/">SeroVerse API Reference</a></li>
+            <li><a href="https://seroverse.github.io/SeroRef/reference/">SeroRef API Reference</a></li>
+            <li><a href="https://seroverse.github.io/KBank/reference/">KBank API Reference</a></li>
+            <li><a href="https://seroverse.github.io/SeroGen/reference/">SeroGen API Reference</a></li>
+            <li><a href="https://seroverse.github.io/SeroEpi/reference/">SeroEpi API Reference</a></li>
+          </ul>
+        </div>
+        <div class="sv-footer-col">
+          <h4>GitHub Repositories</h4>
+          <ul class="sv-footer-list">
+            <li><a href="https://github.com/SeroVerse/SeroVerse" target="_blank" rel="noopener">SeroVerse/SeroVerse ↗</a></li>
+            <li><a href="https://github.com/SeroVerse/SeroRef" target="_blank" rel="noopener">SeroVerse/SeroRef ↗</a></li>
+            <li><a href="https://github.com/SeroVerse/KBank" target="_blank" rel="noopener">SeroVerse/KBank ↗</a></li>
+            <li><a href="https://github.com/SeroVerse/SeroGen" target="_blank" rel="noopener">SeroVerse/SeroGen ↗</a></li>
+            <li><a href="https://github.com/SeroVerse/SeroEpi" target="_blank" rel="noopener">SeroVerse/SeroEpi ↗</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="md-footer-meta md-typeset">
+      <div class="md-footer-meta__inner md-grid">
+        {% include "partials/copyright.html" %}
+        {% if config.extra.social %}
+          {% include "partials/social.html" %}
+        {% endif %}
+      </div>
+    </div>
+  </footer>
+{% endblock %}

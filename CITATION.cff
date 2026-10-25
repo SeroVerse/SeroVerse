@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use SeroVerse in your work, please cite it using the following metadata."
+title: "SeroVerse: Core data structures, graph algorithms, and async database clients for bacterial genomics, glycomics, and sero-epidemiology"
+type: software
+authors:
+  - family-names: "Stanton"
+    given-names: "Thomas David"
+    email: "tomdstanton@gmail.com"
+    orcid: "https://orcid.org/0000-0002-8898-4432"
+    affiliation: "Monash University"
+repository-code: "https://github.com/SeroVerse/SeroVerse"
+url: "https://seroverse.github.io/SeroVerse/"
+license: "GPL-3.0-only"
+keywords:
+  - bioinformatics
+  - genomics
+  - glycomics
+  - epidemiology
+  - serotyping
+  - microbiology

@@ -1,0 +1,118 @@
+---
+title: Architecture & Core Engine
+subtitle: SoA Containers, Sequences, Graphs & Async Clients
+description: Deep dive into SeroVerse's Structure-of-Arrays (SoA) memory model, 2-bit DNA and MMSEQS12 sequence kernels, hybrid MCL clustering, CSR graph & Relational MPNN solvers, and async biological API clients.
+author: Tom Stanton
+icon: lucide/layers
+status: new
+comments: true
+tags:
+  - architecture
+  - algorithms
+  - soa
+  - mcl
+  - graphs
+  - clients
+---
+
+# Architecture & Core Engine
+
+The **`seroverse`** package provides the computational foundation for the entire SeroVerse ecosystem (`SeroRef`, `KBank`, `SeroGen`, and `SeroEpi`). It is organized into two zero-overhead subpackages:
+
+1. **[`seroverse.core`](reference/core.md)** — Zero-copy Structure-of-Arrays (SoA) container protocols (`BatchedContainer`, `RaggedArrayContainer`), genomic intervals (`Intervals`) and FASTA assemblies (`GenomeAssembly`), 2-bit DNA and `MMSEQS12` sequence engines (`Alphabet`, `Sequences`), `RandstrobeIndex` and `FracMinHashIndex` k-mer indices, banded/unbanded Smith-Waterman-Gotoh pairwise alignment (`PairwiseAligner`), hybrid motif-rescued Markov Clustering (`Clusterer`), and CSR graph data structures & solvers (`GraphModel`, `GraphBatch`, `GraphAligner`, `maximum_spanning_arborescence`, `RelationalMPNN`, `LayoutEngine`).
+2. **[`seroverse.client`](reference/client.md)** — Asynchronous, token-bucket rate-limited HTTP clients (`Client`) with `msgspec` msgpack cassette caching (`cassette_context`) for querying **NCBI Entrez & Datasets** (`NCBIClient`), **ENA Portal & Browser** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchBaseClient`).
+
+---
+
+## 1. Zero-Copy Structure-of-Arrays (`seroverse.core.collections`)
+
+All batched biological entities across SeroVerse implement [`BatchedContainer`][seroverse.core.collections.BatchedContainer] or [`RaggedArrayContainer`][seroverse.core.collections.RaggedArrayContainer] rather than storing Python lists of per-record objects:
+
+- **Flat Contiguous Memory**: Variable-length sequences ([`Sequences`][seroverse.core.seq.seq.Sequences]), orthogroup clusters ([`Clusters`][seroverse.core.seq.clustering.Clusters]), and genomic intervals ([`Intervals`][seroverse.core.interval.Intervals]) pack all elements into contiguous 1D NumPy buffers indexed by `offsets` and `lengths` (`int32`).
+- **$O(1)$ Contiguous Views & Parallel Gathering**: Slicing a [`RaggedArrayContainer`][seroverse.core.collections.RaggedArrayContainer] with a contiguous slice (`seqs[start:stop]`) returns a zero-copy NumPy view in $O(1)$ time; boolean masks or arbitrary index arrays dispatch to a parallel Numba gather kernel.
+- **Lazy Scalar Views**: Indexing a single element (`seqs[i]` or `intervals[i]`) materializes an immutable `@dataclass(frozen=True, slots=True)` [`ScalarView`][seroverse.core.collections.ScalarView] on demand.
+
+```mermaid
+classDiagram
+    class ScalarView {
+        <<Protocol>>
+    }
+    class BatchedContainer~T, S~ {
+        <<Protocol>>
+        +__len__() int
+        +__getitem__(item) T | S
+        +empty() S
+        +concat(batches) S
+    }
+    class RaggedArrayContainer~T, S~ {
+        <<Protocol>>
+        +offsets: ndarray[int32]
+        +lengths: ndarray[int32]
+        +indptr: ndarray[int32]
+    }
+    BatchedContainer <|-- RaggedArrayContainer
+    BatchedContainer <|-- GraphBatch
+    BatchedContainer <|.. Intervals
+    BatchedContainer <|.. Seeds
+    BatchedContainer <|.. PairwiseAlignments
+    RaggedArrayContainer <|.. Sequences
+    RaggedArrayContainer <|.. Clusters
+```
+
+---
+
+## 2. Sequence, K-mer & Alignment Engines (`seroverse.core.seq`)
+
+- **Bit-Packed Alphabets & Ragged Translation ([`alphabet.py`][seroverse.core.seq.alphabet])**:
+  - [`Alphabet.DNA`][seroverse.core.seq.alphabet.Alphabet] encodes ASCII nucleotide strings into 2-bit integers (`0..3`) via a Numba LUT kernel and supports vectorized reverse-complementation and ragged translation across standard bacterial/viral (`table 11`), Mycoplasma (`table 4`), and candidate division (`table 25`) genetic codes ([`GeneticCode`][seroverse.core.seq.alphabet.GeneticCode]).
+  - [`Alphabet.MMSEQS12`][seroverse.core.seq.alphabet.Alphabet] compresses the 20 standard amino acids into 12 physicochemical equivalence classes for high-sensitivity twilight-zone seeding.
+- **Syncmer-Linked Randstrobes & FracMinHash ([`kmers.py`][seroverse.core.seq.kmers])**:
+  - [`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex] links pairs of open syncmers into 64-bit strobemer hashes stored in a CSR lookup table for $O(1)$ seed matching across variable-rate indels.
+  - [`FracMinHashIndex`][seroverse.core.seq.kmers.FracMinHashIndex] computes scaled bottom-hash sketches for rapid containment and Jaccard similarity estimation.
+- **Vectorized Smith-Waterman-Gotoh Alignment ([`pairwise.py`][seroverse.core.seq.pairwise])**:
+  - [`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner] executes parallel `@njit(nogil=True, parallel=True)` affine-gap local and semi-global alignments (both X-drop/banded around strobemer seeds and unbanded all-vs-all) with `BLOSUM62` or custom substitution matrices, returning a [`PairwiseAlignments`][seroverse.core.seq.pairwise.PairwiseAlignments] SoA batch.
+
+---
+
+## 3. Hybrid Sequence Clustering & Sparse MCL (`seroverse.core.seq.clustering`)
+
+[`Clusterer`][seroverse.core.seq.clustering.Clusterer] groups proteins or nucleotide sequences into non-redundant orthogroups ([`Clusters`][seroverse.core.seq.clustering.Clusters] ragged SoA container with zero-copy `.as_csr()` membership matrices) through a 4-stage pipeline:
+
+1. **Exact & Strobemer Seeding**: Deduplicates identical sequences via 64-bit `FNV-1a` hashes ([`Sequences.unique`][seroverse.core.seq.seq.Sequences.unique]), builds syncmer-linked [`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex] lookup tables, and aligns candidate pairs with banded Smith-Waterman-Gotoh ([`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner]).
+2. **Reduced-Alphabet `MMSEQS12` Diagonal Prefilter**: In sensitive/MCL mode, builds a $12^4 = 20,736$-bucket CSR inverted index of `Alphabet.MMSEQS12` 4-mers, scores ungapped BLOSUM62 diagonals, and evaluates intra-role pairs via unbanded Smith-Waterman-Gotoh so divergent homologs are aligned even when they share zero exact k-mers.
+3. **Role-Gated Motif-Embedding Rescue**: When neural motif embeddings (e.g., from `SeroRef`'s `GeneRoleClassifier`) are provided, pairs sharing the same functional role with active-site cosine similarity $\ge \tau_{\text{motif}}$ (`motif_rescue_threshold=0.75`) are rescued down to `15%` sequence identity and blended into the alignment bitscore graph.
+4. **Compiled Graph Clustering Kernels**:
+   - **`mode="mcl"` (Markov Cluster Algorithm)**: Runs a Numba-compiled sparse MCL solver (`_mcl_cluster`) with column-wise top-$K$ pruning, stochastic random-walk expansion, and inflation ($I = 2.0$) to resolve natural functional orthogroups.
+   - **`mode="cdhit"` / `"greedy_cover"` / `"upgma"` / `"connected_components"`**: Length-descending greedy incremental clustering, greedy set cover, average-linkage UPGMA, or transitive connected components.
+
+---
+
+## 4. CSR Graphs, Arborescences & Relational MPNNs (`seroverse.core.graph`)
+
+Both biosynthetic gene clusters (`SeroRef`) and chemical polysaccharide structures (`KBank`, `SeroGen`) are modeled as directed attributed graphs in [`seroverse.core.graph`](reference/core.md):
+
+- **Bit-Packed 32-Bit Nodes, Edges & Pan-Graphs ([`models.py`][seroverse.core.graph.models])**:
+  - [`IntNode`][seroverse.core.graph.models.IntNode] and [`BitField`][seroverse.core.graph.models.BitField] pack multi-attribute biological descriptors (gene roles, orthogroup IDs, monosaccharide stereochemistry, linkage positions) into primitive `uint32` integers.
+  - [`GraphModel`][seroverse.core.graph.models.GraphModel] and [`GraphBatch`][seroverse.core.graph.models.GraphBatch] store thousands of variable-size graphs in flat contiguous SoA arrays with parallel Numba slicing, Laplacian spectral Wasserstein-1 distances, and **`.as_pan_graph()`** to compress a batch of graphs into a unified directed consensus network.
+- **Weisfeiler-Lehman + Hungarian Bipartite Graph Alignment ([`align.py`][seroverse.core.graph.align])**:
+  - [`GraphAligner`][seroverse.core.graph.align.GraphAligner] combines pluggable semantic node/edge cost strategies with continuous Weisfeiler-Lehman neighborhood smoothing ([`WeisfeilerLehmanEmbedding`][seroverse.core.graph.align.WeisfeilerLehmanEmbedding]) and Hungarian minimum-cost assignment.
+- **Directed Spanning Arborescences & Constrained $K$-Best Enumeration ([`arborescence.py`][seroverse.core.graph.arborescence])**:
+  - [`maximum_spanning_arborescence`][seroverse.core.graph.arborescence.maximum_spanning_arborescence] and [`k_best_arborescences`][seroverse.core.graph.arborescence.k_best_arborescences] combine an $O(N^2)$ Chu-Liu/Edmonds optimum branching solver with a compiled Numba branch-and-bound solver supporting 3D `(N, N, S)` valence/slot exclusivity (`slot_exclusivity=True`) and `edge_groups` constraints.
+- **Numba Relational Message-Passing Neural Network ([`gnn.py`][seroverse.core.graph.gnn])**:
+  - [`RelationalMPNN`][seroverse.core.graph.gnn.RelationalMPNN] executes parallel `@njit` forward and backward relational message passing over multi-hop incoming-edge CSR graphs ([`RelationalCSR`][seroverse.core.graph.gnn.RelationalCSR]) with RMSNorm, clamped-node anchor injection, bilinear multi-channel edge/slot scoring, and differentiable log-space [`sinkhorn_bipartite_matching`][seroverse.core.graph.gnn.sinkhorn_bipartite_matching].
+- **Force-Directed & Spectral Coordinate Layouts ([`layout.py`][seroverse.core.graph.layout])**:
+  - [`LayoutEngine`][seroverse.core.graph.layout.LayoutEngine] computes 2D/3D Fruchterman-Reingold and spectral coordinates for interactive visualization of pan-locus networks and chemical graphs.
+
+---
+
+## 5. Async Biological Repository Clients (`seroverse.client`)
+
+[`seroverse.client`](reference/client.md) provides a unified, rate-limited asynchronous HTTP client layer built on `aiohttp` and `msgspec`:
+
+- **Token-Bucket Rate Limiting & Msgpack Cassettes ([`base.py`][seroverse.client.base])**:
+  - [`Client`][seroverse.client.base.Client] enforces per-endpoint token-bucket rate limits, automatic exponential backoff on transient HTTP `429`/`5xx` responses, and deterministic offline replay via [`cassette_context`][seroverse.client.base.cassette_context] and `msgspec` msgpack serialization.
+- **Repository-Specific Clients**:
+  - **[`NCBIClient`][seroverse.client.ncbi.NCBIClient] (`seroverse.client.ncbi`)**: Async wrapper for NCBI Entrez E-utilities (`esearch`, `esummary`, `efetch`, `elink`) and NCBI Datasets v2 REST API (`DatasetAssemblyReport`, `NuccoreSummary`, `PubMedSummary`).
+  - **[`ENAClient`][seroverse.client.ena.ENAClient] (`seroverse.client.ena`)**: Queries the ENA Portal API, Browser FASTA/embl endpoints, and NCTC reference strain metadata (`ENAAssemblyRecord`, `ENASampleRecord`, `NCTCReferenceStrain`).
+  - **[`BacDiveClient`][seroverse.client.dsmz.BacDiveClient] & [`StrainInfoClient`][seroverse.client.dsmz.StrainInfoClient] (`seroverse.client.dsmz`)**: Resolves culture collection synonym rings, serovar metadata, and linked literature across DSMZ BacDive and StrainInfo (`StrainPassport`, `StrainLiterature`).
+  - **[`PathogenwatchBaseClient`][seroverse.client.pathogenwatch.PathogenwatchBaseClient] (`seroverse.client.pathogenwatch`)**: Streams curated global surveillance collections, assembly accessions, and antimicrobial resistance / serotype metadata (`PathogenwatchCollection`).
