@@ -1,4 +1,4 @@
-"""Unit tests for `seroverse.core.graph` (CSR, RelationalCSR, GraphModel, GraphBatch, Align, Arborescence, GNN, Layout)."""
+"""Unit tests for `seroverse.core.graph` (CSR, RelationalCSR, Graph, Graphs, Align, Arborescence, GNN, Layout)."""
 
 from pathlib import Path
 

@@ -1,7 +1,7 @@
 ---
 title: seroverse.core
 subtitle: SoA Containers, Sequences, MCL & Graphs
-description: "API reference for seroverse.core: BatchedContainer/RaggedArrayContainer protocols, Sequences, RandstrobeIndex, PairwiseAligner, Clusterer, GraphModel, GraphBatch, and RelationalMPNN."
+description: "API reference for seroverse.core: BatchedContainer/RaggedArrayContainer protocols, Sequences, RandstrobeIndex, PairwiseAligner, Clusterer, Graph, Graphs, and RelationalMPNN."
 author: Tom Stanton
 icon: lucide/binary
 comments: true

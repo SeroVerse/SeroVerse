@@ -253,7 +253,7 @@ class GraphAligner:
     config: AlignmentConfig = AlignmentConfig.default()
 
     def align(self, graph_a: Graph, graph_b: Graph) -> Alignment:
-        """Execute bipartite graph alignment between two `GraphModel` instances."""
+        """Execute bipartite graph alignment between two [`Graph`][seroverse.core.graph.models.Graph] instances."""
         is_sym = self.config.symmetrize_embedding
         adj_a, labels_a = graph_a.as_graph(as_bipartite=self.config.as_bipartite, symmetrize=is_sym)
         adj_b, labels_b = graph_b.as_graph(as_bipartite=self.config.as_bipartite, symmetrize=is_sym)

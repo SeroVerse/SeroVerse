@@ -1076,7 +1076,7 @@ class RelationalCSR(CSR):
         include_2hop: bool = True,
         add_virtual_pool: bool = True,
     ) -> Self:
-        r"""Build a multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR] directly from a [`GraphBatch`][seroverse.core.graph.models.GraphBatch]."""
+        r"""Build a multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR] directly from a [`Graphs`][seroverse.core.graph.models.Graphs] batch."""
         return cls.from_multihop(
             batch.node_offsets,
             batch.edge_sources,
@@ -1094,7 +1094,7 @@ class RelationalCSR(CSR):
         include_2hop: bool = True,
         add_virtual_pool: bool = True,
     ) -> Self:
-        r"""Build a multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR] from a single [`GraphModel`][seroverse.core.graph.models.GraphModel]."""
+        r"""Build a multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR] from a single [`Graph`][seroverse.core.graph.models.Graph]."""
         n_nodes = len(graph.nodes)
         edges = graph.edges
         n_edges = len(edges)

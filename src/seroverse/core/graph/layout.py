@@ -1,8 +1,8 @@
 r"""Force-directed and spectral graph layout algorithms with Numba-accelerated kernels.
 
 Provides [`LayoutEngine`][seroverse.core.graph.layout.LayoutEngine] for computing 2D and $D$-dimensional
-node coordinates for [`GraphModel`][seroverse.core.graph.models.GraphModel] instances,
-[`GraphBatch`][seroverse.core.graph.models.GraphBatch] pan-graphs, and sparse adjacency matrices
+node coordinates for [`Graph`][seroverse.core.graph.models.Graph] instances,
+[`Graphs`][seroverse.core.graph.models.Graphs] pan-graphs, and sparse adjacency matrices
 using the Fruchterman-Reingold spring-electrical algorithm.
 """
 
@@ -25,9 +25,9 @@ type InitMode = Literal["random", "circular", "spectral"]
 class LayoutEngine:
     r"""Configurable graph layout engine with Numba-accelerated Fruchterman-Reingold physics.
 
-    Supports laying out single [`GraphModel`][seroverse.core.graph.models.GraphModel] instances,
-    [`GraphBatch`][seroverse.core.graph.models.GraphBatch] collections (via their unified
-    [`.as_pan_graph()`][seroverse.core.graph.models.GraphBatch.as_pan_graph] representation),
+    Supports laying out single [`Graph`][seroverse.core.graph.models.Graph] instances,
+    [`Graphs`][seroverse.core.graph.models.Graphs] collections (via their unified
+    [`.as_pan_graph()`][seroverse.core.graph.models.Graphs.as_pan_graph] representation),
     or raw SciPy sparse / NumPy adjacency matrices.
 
     Attributes:
@@ -41,8 +41,8 @@ class LayoutEngine:
         tol: Early stopping threshold on maximum node displacement. Defaults to `1e-4`.
         init: Coordinate initialization strategy (`"random"`, `"circular"`, or `"spectral"`).
         use_weights: Whether edge weights scale attractive forces. Defaults to `True`.
-        as_bipartite: Whether to expand edges as bipartite nodes when laying out a `GraphModel`.
-        node_mask: Optional bitmask passed to `GraphBatch.as_pan_graph(node_mask=...)`.
+        as_bipartite: Whether to expand edges as bipartite nodes when laying out a `Graph`.
+        node_mask: Optional bitmask passed to `Graphs.as_pan_graph(node_mask=...)`.
         seed: Deterministic random seed for coordinate initialization. Defaults to `42`.
     """
 
@@ -131,8 +131,8 @@ class LayoutEngine:
         r"""Compute `(N, dim)` layout coordinates for a graph, batch pan-graph, or adjacency matrix.
 
         Args:
-            graph: Input [`GraphModel`][seroverse.core.graph.models.GraphModel],
-                [`GraphBatch`][seroverse.core.graph.models.GraphBatch] (laid out via `.as_pan_graph()`),
+            graph: Input [`Graph`][seroverse.core.graph.models.Graph],
+                [`Graphs`][seroverse.core.graph.models.Graphs] (laid out via `.as_pan_graph()`),
                 sparse [`CSR`][seroverse.core.graph.csr.CSR], or dense 2D adjacency array.
             pos: Optional initial `(N, dim)` node coordinates for warm-starting or pinning.
             fixed: Optional sequence/array of node indices (or boolean mask of length `N`)
@@ -190,7 +190,7 @@ class LayoutEngine:
         self,
         graph: Graph | Graphs[Any, Any] | CSR | np.ndarray,
     ) -> CSR:
-        r"""Normalize input `GraphModel`, `GraphBatch`, or matrix into a square `CSR`."""
+        r"""Normalize input `Graph`, `Graphs`, or matrix into a square `CSR`."""
         if isinstance(graph, Graphs):
             adj, _, _ = graph.as_pan_graph(node_mask=self.node_mask)
             return adj
@@ -207,7 +207,7 @@ class LayoutEngine:
             return CSR.from_dense(graph)
         raise TypeError(
             f"Unsupported graph type {type(graph).__name__!r}. "
-            "Expected GraphModel, GraphBatch, seroverse.core.graph.csr.CSR, or 2D numpy.ndarray."
+            "Expected Graph, Graphs, seroverse.core.graph.csr.CSR, or 2D numpy.ndarray."
         )
 
     def _init_positions(

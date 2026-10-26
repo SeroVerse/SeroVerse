@@ -301,7 +301,7 @@ class Graph(ScalarView):
         Wasserstein-1 distance via a compiled Numba 1D optimal transport kernel.
 
         Args:
-            other: Another GraphModel instance to compare against.
+            other: Another [`Graph`][seroverse.core.graph.models.Graph] instance to compare against.
 
         Returns:
             Wasserstein distance between the two normalized Laplacian spectra as a float.
@@ -383,7 +383,7 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
 
     @classmethod
     def from_list(cls, graphs: Sequence[Graph]) -> Self:
-        """Pack a sequence of [`GraphModel`][seroverse.core.graph.models.GraphModel] instances into a `GraphBatch`."""
+        """Pack a sequence of [`Graph`][seroverse.core.graph.models.Graph] instances into a [`Graphs`][seroverse.core.graph.models.Graphs] batch."""
         n_graphs = len(graphs)
         if n_graphs == 0:
             return cls.empty()
@@ -436,7 +436,7 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
         allow_self_loops: bool = False,
         rng: np.random.Generator | int | None = None,
     ) -> Self:
-        r"""Generate a random [`GraphBatch`][seroverse.core.graph.models.GraphBatch] using the Erdős–Rényi $G(n, p)$ model.
+        r"""Generate a random [`Graphs`][seroverse.core.graph.models.Graphs] batch using the Erdős–Rényi $G(n, p)$ model.
 
         Args:
             n_graphs: Number of graphs in the batch (`n_graphs >= 0`). Defaults to `10`.
@@ -451,7 +451,7 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
             rng: Optional `np.random.Generator`, integer seed, or `None` passed to `np.random.default_rng`.
 
         Returns:
-            Self: A newly generated `GraphBatch` instance.
+            Self: A newly generated [`Graphs`][seroverse.core.graph.models.Graphs] instance.
         """
         if n_graphs < 0:
             raise ValueError(f"n_graphs must be >= 0; got {n_graphs}.")
@@ -506,14 +506,14 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
     def __getitem__(self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]) -> T | S: ...
 
     def __getitem__(self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]) -> T | S:
-        """Extract a single [`GraphModel`][seroverse.core.graph.models.GraphModel] by integer index, or a sub-batch by slice/mask/indices."""
+        """Extract a single [`Graph`][seroverse.core.graph.models.Graph] by integer index, or a sub-batch by slice/mask/indices."""
         if isinstance(item, (int, np.integer)):
             idx = int(item)
             n_graphs = len(self)
             if idx < 0:
                 idx += n_graphs
             if idx < 0 or idx >= n_graphs:
-                raise IndexError(f"GraphBatch index {item} out of bounds for batch of length {n_graphs}.")
+                raise IndexError(f"Graphs index {item} out of bounds for batch of length {n_graphs}.")
             n_s, n_e = int(self.node_offsets[idx]), int(self.node_offsets[idx + 1])
             e_s, e_e = int(self.edge_offsets[idx]), int(self.edge_offsets[idx + 1])
             nodes = tuple(int(x) for x in self.node_types[n_s:n_e])
@@ -888,7 +888,7 @@ def _slice_graph_batch_kernel(
     new_node_offsets: np.ndarray,
     new_edge_offsets: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Gather nodes and rebase edges in parallel across selected graphs in a `GraphBatch`."""
+    """Gather nodes and rebase edges in parallel across selected graphs in a `Graphs` batch."""
     num_kept = len(kept_indices)
     total_nodes = int(new_node_offsets[num_kept])
     total_edges = int(new_edge_offsets[num_kept])

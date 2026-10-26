@@ -26,6 +26,6 @@ The **`seroverse`** package provides the core Structure-of-Arrays (SoA) containe
 
     ---
 
-    Token-bucket rate-limited async HTTP `Client` with `msgspec` cassette serialization (`cassette_context`) and specialized clients for **NCBI** (`NCBIClient`), **ENA** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchClient`).
+    Token-bucket rate-limited async HTTP `Client` with `msgspec` msgpack serialization and specialized clients for **NCBI** (`NCBIClient`), **ENA** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchClient`).
 
 </div>

@@ -180,7 +180,7 @@ flowchart TB
     subgraph SV["<b>0. SeroVerse Foundation (seroverse.core &amp; seroverse.client)</b>"]
         direction LR
         SOA["<b>SoA &amp; Seq Engine</b><br/><i>BatchedContainer, 2-Bit DNA,<br/>Randstrobe, SW-Gotoh, MCL</i>"]
-        GRP["<b>CSR Graph &amp; GNN Core</b><br/><i>GraphBatch, WL+Hungarian,<br/>Arborescence, RelationalMPNN</i>"]
+        GRP["<b>CSR Graph &amp; GNN Core</b><br/><i>Graphs, WL+Hungarian,<br/>Arborescence, RelationalMPNN</i>"]
         CLI["<b>Async API Clients</b><br/><i>NCBI, ENA, DSMZ BacDive,<br/>StrainInfo, Pathogenwatch</i>"]
     end
 

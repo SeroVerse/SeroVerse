@@ -20,7 +20,7 @@ tags:
 The **`seroverse`** package provides the computational foundation for the entire SeroVerse ecosystem (`SeroRef`, `KBank`, `SeroGen`, and `SeroEpi`). It is organized into two zero-overhead subpackages:
 
 1. **[`seroverse.core`](reference/core.md)** — Zero-copy Structure-of-Arrays (SoA) container protocols (`BatchedContainer`, `RaggedArrayContainer`), genomic intervals (`Intervals`) and FASTA assemblies (`GenomeAssembly`), 2-bit DNA and `MMSEQS12` sequence engines (`Alphabet`, `Sequences`), `RandstrobeIndex` and `FracMinHashIndex` k-mer indices, banded/unbanded Smith-Waterman-Gotoh pairwise alignment (`PairwiseAligner`), hybrid motif-rescued Markov Clustering (`Clusterer`), and CSR graph data structures & solvers (`CSR`, `RelationalCSR`, `Graph`, `Graphs`, `GraphAligner`, `ArborescenceSolver`, `RelationalMPNN`, `LayoutEngine`).
-2. **[`seroverse.client`](reference/client.md)** — Asynchronous, token-bucket rate-limited HTTP clients (`Client`) with `msgspec` msgpack cassette caching (`cassette_context`) for querying **NCBI Entrez & Datasets** (`NCBIClient`), **ENA Portal & Browser** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchClient`).
+2. **[`seroverse.client`](reference/client.md)** — Asynchronous, token-bucket rate-limited HTTP clients (`Client`) with `msgspec` msgpack serialization and `cassetter` replay support for querying **NCBI Entrez & Datasets** (`NCBIClient`), **ENA Portal & Browser** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchClient`).
 
 ---
 
@@ -51,7 +51,7 @@ classDiagram
         +indptr: ndarray[int32]
     }
     BatchedContainer <|-- RaggedArrayContainer
-    BatchedContainer <|-- GraphBatch
+    BatchedContainer <|-- Graphs
     BatchedContainer <|.. Intervals
     BatchedContainer <|.. Seeds
     BatchedContainer <|.. PairwiseAlignments
@@ -93,7 +93,7 @@ Both biosynthetic gene clusters (`SeroRef`) and chemical polysaccharide structur
 
 - **Bit-Packed 32-Bit Nodes, Edges & Pan-Graphs ([`models.py`][seroverse.core.graph.models])**:
   - [`IntNode`][seroverse.core.graph.models.IntNode] and [`BitField`][seroverse.core.graph.models.BitField] pack multi-attribute biological descriptors (gene roles, orthogroup IDs, monosaccharide stereochemistry, linkage positions) into primitive `uint32` integers.
-  - [`Graph`][seroverse.core.graph.models.GraphModel] and [`Graphs`][seroverse.core.graph.models.GraphBatch] store thousands of variable-size graphs in flat contiguous SoA arrays with parallel Numba slicing, Laplacian spectral Wasserstein-1 distances, and **`.as_pan_graph()`** to compress a batch of graphs into a unified directed consensus network.
+  - [`Graph`][seroverse.core.graph.models.Graph] and [`Graphs`][seroverse.core.graph.models.Graphs] store thousands of variable-size graphs in flat contiguous SoA arrays with parallel Numba slicing, Laplacian spectral Wasserstein-1 distances, and **`.as_pan_graph()`** to compress a batch of graphs into a unified directed consensus network.
 - **Weisfeiler-Lehman + Hungarian Bipartite Graph Alignment ([`align.py`][seroverse.core.graph.align])**:
   - [`GraphAligner`][seroverse.core.graph.align.GraphAligner] combines pluggable semantic node/edge cost strategies with continuous Weisfeiler-Lehman neighborhood smoothing ([`WeisfeilerLehmanEmbedding`][seroverse.core.graph.align.WeisfeilerLehmanEmbedding]) and Hungarian minimum-cost assignment.
 - **Sparse CSR & Multi-Relational CSR Matrices ([`csr.py`][seroverse.core.graph.csr])**:
@@ -113,7 +113,7 @@ Both biosynthetic gene clusters (`SeroRef`) and chemical polysaccharide structur
 [`seroverse.client`](reference/client.md) provides a unified, rate-limited asynchronous HTTP client layer built on `aiohttp` and `msgspec`:
 
 - **Token-Bucket Rate Limiting & Msgpack Cassettes ([`base.py`][seroverse.client.base])**:
-  - [`Client`][seroverse.client.base.Client] enforces per-endpoint token-bucket rate limits, automatic exponential backoff on transient HTTP `429`/`5xx` responses, and deterministic offline replay via [`cassette_context`][seroverse.client.base.cassette_context] and `msgspec` msgpack serialization.
+  - [`Client`][seroverse.client.base.Client] enforces per-endpoint concurrency semaphores, polite request pacing, and deterministic offline replay via `cassetter` and `msgspec` msgpack serialization ([`encode_msgpack`][seroverse.client.base.Client.encode_msgpack], [`decode_msgpack`][seroverse.client.base.Client.decode_msgpack]).
 - **Repository-Specific Clients**:
   - **[`NCBIClient`][seroverse.client.ncbi.NCBIClient] (`seroverse.client.ncbi`)**: Async wrapper for NCBI Entrez E-utilities (`esearch`, `esummary`, `efetch`, `elink`) and NCBI Datasets v2 REST API (`DatasetAssemblyReport`, `NuccoreSummary`, `PubMedSummary`).
   - **[`ENAClient`][seroverse.client.ena.ENAClient] (`seroverse.client.ena`)**: Queries the ENA Portal API, Browser FASTA/embl endpoints, and NCTC reference strain metadata (`ENAAssemblyRecord`, `ENASampleRecord`, `NCTCReferenceStrain`).

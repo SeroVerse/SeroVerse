@@ -374,12 +374,12 @@ class RelationalMPNN:
 
     @staticmethod
     def _coerce_csr(csr: RelationalCSR | Graph | Graphs[Any, Any]) -> RelationalCSR:
-        """Coerce a `GraphModel` or `GraphBatch` into a `RelationalCSR` if needed."""
+        """Coerce a `Graph` or `Graphs` into a `RelationalCSR` if needed."""
         if isinstance(csr, RelationalCSR):
             return csr
         if isinstance(csr, (Graph, Graphs)):
             return csr.as_relational_csr()
-        raise TypeError(f"Expected RelationalCSR, GraphModel, or GraphBatch; got {type(csr).__name__}.")
+        raise TypeError(f"Expected RelationalCSR, Graph, or Graphs; got {type(csr).__name__}.")
 
     def _prepare_features(
         self,
@@ -497,8 +497,8 @@ class RelationalMPNN:
 
         Args:
             x: Input node feature matrix `(N_real, in_dim)` or `(N_total, in_dim)`.
-            csr: [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR], [`GraphModel`][seroverse.core.graph.models.GraphModel],
-                or [`GraphBatch`][seroverse.core.graph.models.GraphBatch] connectivity structure.
+            csr: [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR], [`Graph`][seroverse.core.graph.models.Graph],
+                or [`Graphs`][seroverse.core.graph.models.Graphs] connectivity structure.
             node_targets: Optional 1D `int32` array of ground-truth node class indices (`-1` = ignore).
             node_weights: Optional 1D `float32` array of per-node loss weights.
             edge_node_indices: Optional 1D `int32` array of active tree vertices `[v_0, ..., v_{M-1}]`.
