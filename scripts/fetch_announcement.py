@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 REPO_OWNER = "SeroVerse"
-REPO_NAME = ".github"
+REPO_NAME = "SeroVerse"
 CATEGORY_NAME = "Announcements"
 ANNOUNCEMENT_FILE = Path("docs/overrides/announcement.html")
 
