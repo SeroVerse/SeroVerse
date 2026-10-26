@@ -66,9 +66,7 @@ def sync_target(target_repo: Path, *, check_only: bool = False) -> list[str]:
         src = ROOT / favicon_src_rel
         dst = target_repo / "docs/assets/favicon.svg"
         if src.exists():
-            messages.append(
-                _sync_pair(src, dst, f"{target_repo.name}/docs/assets/favicon.svg", check_only=check_only)
-            )
+            messages.append(_sync_pair(src, dst, f"{target_repo.name}/docs/assets/favicon.svg", check_only=check_only))
 
     return messages
 

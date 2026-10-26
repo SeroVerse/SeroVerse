@@ -83,7 +83,7 @@ jobs:
       - name: Run pytest suite with coverage
         run: |
           uv run --no-sync pytest \
-            -o addopts="-ra --tb=short --cov=src/serogen --cov-report=term-missing --cov-report=xml --junitxml=pytest-report.xml"
+            -o addopts="-ra --tb=short --cov=src/seroverse --cov-report=term-missing --cov-report=xml --junitxml=pytest-report.xml"
 
       - name: Publish test summary
         if: always()
