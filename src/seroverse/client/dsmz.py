@@ -49,7 +49,8 @@ class StrainPassport:
         si_obj = raw.get("strain") if isinstance(raw.get("strain"), dict) else raw
         if not isinstance(si_obj, dict):
             return None
-        si_id = int(si_obj.get("id") or 0)
+        raw_id = si_obj.get("siID") if si_obj.get("siID") is not None else si_obj.get("id")
+        si_id = int(raw_id or 0) if str(raw_id or "").isdigit() else 0
         if si_id <= 0:
             return None
 
@@ -58,20 +59,26 @@ class StrainPassport:
         ncbi_taxid = (
             int(taxon.get("ncbi") or 0) if isinstance(taxon, dict) and str(taxon.get("ncbi") or "").isdigit() else 0
         )
-        bacdive_id = int(si_obj.get("bacdive") or 0) if str(si_obj.get("bacdive") or "").isdigit() else 0
-        type_strain = bool(si_obj.get("type_strain"))
+        raw_bd = si_obj.get("bdID") if si_obj.get("bdID") is not None else si_obj.get("bacdive")
+        bacdive_id = int(raw_bd or 0) if str(raw_bd or "").isdigit() else 0
+        type_strain = bool(si_obj.get("typeStrain") if "typeStrain" in si_obj else si_obj.get("type_strain"))
 
         des_list: list[str] = []
         rel = si_obj.get("relation") or {}
         if isinstance(rel, dict):
-            for c_item in rel.get("culture") or ():
-                if isinstance(c_item, dict) and (sn := str(c_item.get("strain_number") or "").strip()):
-                    if sn not in des_list:
+            for c_item in (rel.get("deposit") or ()) or (rel.get("culture") or ()):
+                if isinstance(c_item, dict):
+                    sn = str(c_item.get("designation") or c_item.get("strain_number") or "").strip()
+                    if sn and sn not in des_list:
                         des_list.append(sn)
             for d_item in rel.get("designation") or ():
                 sn_d = str(d_item.get("designation") if isinstance(d_item, dict) else d_item or "").strip()
                 if sn_d and sn_d not in des_list:
                     des_list.append(sn_d)
+        for dep_item in raw.get("deposits") or ():
+            if isinstance(dep_item, dict) and (sn_dep := str(dep_item.get("designation") or "").strip()):
+                if sn_dep not in des_list:
+                    des_list.append(sn_dep)
 
         pmids: list[int] = []
         dois: list[str] = []
@@ -86,13 +93,13 @@ class StrainPassport:
 
         seq_accs: list[str] = []
         gen_accs: list[str] = []
-        for seq in si_obj.get("sequences") or ():
-            if isinstance(seq, dict) and (acc := str(seq.get("accession") or "").strip()):
+        for seq in (si_obj.get("sequence") or ()) or (si_obj.get("sequences") or ()):
+            if isinstance(seq, dict) and (acc := str(seq.get("accessionNumber") or seq.get("accession") or "").strip()):
                 s_type = str(seq.get("type") or "").lower()
                 if "genome" in s_type or acc.startswith(("GCA_", "GCF_")):
                     if acc not in gen_accs:
                         gen_accs.append(acc)
-                elif acc not in seq_accs:
+                elif s_type != "rrnaop" and acc not in seq_accs:
                     seq_accs.append(acc)
 
         return cls(
