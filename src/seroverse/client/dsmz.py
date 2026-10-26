@@ -12,6 +12,7 @@ from typing import Any
 import msgspec
 
 from seroverse.client.base import Client
+from seroverse.progress import current_progress
 
 STRAININFO_V2_URL = "https://api.straininfo.dsmz.de/v2"
 BACDIVE_V2_URL = "https://api.bacdive.dsmz.de/v2"
@@ -165,8 +166,13 @@ class StrainInfoClient(Client):
         if not unique_ids:
             return []
         passports: list[StrainPassport] = []
+        chunks = [unique_ids[i : i + batch_size] for i in range(0, len(unique_ids), batch_size)]
+        prog = current_progress()
+        completed = 0
+        total = len(chunks)
 
         async def _fetch_chunk(chunk: Sequence[int]) -> list[StrainPassport]:
+            nonlocal completed
             joined = ",".join(str(x) for x in chunk)
             try:
                 raw = await self.stream_bytes("GET", f"data/strain/max/{joined}")
@@ -179,9 +185,12 @@ class StrainInfoClient(Client):
                     ]
             except Exception:
                 pass
+            finally:
+                completed += 1
+                if prog.is_active:
+                    prog.report(completed / total, detail=f"StrainInfo passports: batch {completed}/{total}")
             return []
 
-        chunks = [unique_ids[i : i + batch_size] for i in range(0, len(unique_ids), batch_size)]
         for res in await asyncio.gather(*[_fetch_chunk(c) for c in chunks]):
             passports.extend(res)
         return passports

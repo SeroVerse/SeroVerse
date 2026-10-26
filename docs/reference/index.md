@@ -16,16 +16,16 @@ The **`seroverse`** package provides the core Structure-of-Arrays (SoA) containe
 
 <div class="grid cards" markdown>
 
--   :lucide-binary: **[`seroverse.core`](core.md)**
+- :lucide-binary: **[`seroverse.core`](core.md)**
 
     ---
 
-    SoA container protocols (`BatchedContainer`, `RaggedArrayContainer`), genomic `Intervals`, `GenomeAssembly`, `Alphabet` & `Sequences`, `RandstrobeIndex`, `PairwiseAligner`, `Clusterer` (MCL & CD-HIT), `GraphModel` & `GraphBatch`, `GraphAligner`, `maximum_spanning_arborescence`, `RelationalMPNN`, and `LayoutEngine`.
+    SoA container protocols (`BatchedContainer`, `RaggedArrayContainer`), genomic `Intervals`, `GenomeAssembly`, `Alphabet` & `Sequences`, `RandstrobeIndex`, `PairwiseAligner`, `Clusterer` (MCL & CD-HIT), `CSR` & `RelationalCSR`, `Graph` & `Graphs`, `GraphAligner`, `ArborescenceSolver` (`Arborescence`, `Arborescences`), `RelationalMPNN`, and `LayoutEngine`.
 
 -   :lucide-cloud-download: **[`seroverse.client`](client.md)**
 
     ---
 
-    Token-bucket rate-limited async HTTP `Client` with `msgspec` cassette serialization (`cassette_context`) and specialized clients for **NCBI** (`NCBIClient`), **ENA** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchBaseClient`).
+    Token-bucket rate-limited async HTTP `Client` with `msgspec` cassette serialization (`cassette_context`) and specialized clients for **NCBI** (`NCBIClient`), **ENA** (`ENAClient`), **DSMZ BacDive & StrainInfo** (`BacDiveClient`, `StrainInfoClient`), and **Pathogenwatch** (`PathogenwatchClient`).
 
 </div>

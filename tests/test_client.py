@@ -4,43 +4,28 @@ from pathlib import Path
 
 import msgspec
 
-from seroverse.client import (
-    BacDiveClient,
-    Client,
-    ENAAssemblyRecord,
-    ENAClient,
-    ENASampleRecord,
-    NCBIClient,
-    NCTCReferenceStrain,
-    NuccoreSummary,
-    PathogenwatchBaseClient,
-    PathogenwatchCollection,
-    PubMedSummary,
-    StrainInfoClient,
-    StrainPassport,
-    decode_msgpack,
-    encode_msgpack,
-    load_msgpack,
-    save_msgpack,
-)
+from seroverse.client.base import Client
+from seroverse.client.dsmz import BacDiveClient, StrainInfoClient, StrainPassport
+from seroverse.client.ena import ENAAssemblyRecord, ENAClient, ENASampleRecord
+from seroverse.client.ncbi import NCBIClient, NuccoreSummary, PubMedSummary
+from seroverse.client.pathogenwatch import PathogenwatchClient, PathogenwatchCollection
 
 
 def test_msgpack_roundtrip_and_frozen_dataclasses(tmp_path: Path) -> None:
-    ref = NCTCReferenceStrain(
+    ref = ENASampleRecord(
         sample_accession="SAMEA3231288",
-        assembly_accession="GCA_900706755.1",
-        organism="Escherichia coli",
+        scientific_name="Escherichia coli",
         strain="NCTC 9001",
         serotype="O1:K1(L1):H7",
-        tax_id=562,
+        tax_id="562",
     )
-    packed = encode_msgpack([ref])
-    unpacked = decode_msgpack(packed, list[NCTCReferenceStrain])
+    packed = Client.encode_msgpack([ref])
+    unpacked = Client.decode_msgpack(packed, list[ENASampleRecord])
     assert unpacked == [ref]
 
     cache_file = tmp_path / "nctc.msgpack"
-    save_msgpack(cache_file, [ref])
-    loaded = load_msgpack(cache_file, list[NCTCReferenceStrain])
+    Client.save_msgpack(cache_file, [ref])
+    loaded = Client.load_msgpack(cache_file, list[ENASampleRecord])
     assert loaded == [ref]
 
 
@@ -89,7 +74,7 @@ def test_ena_and_ncbi_json_decoding() -> None:
     assert len(asms) == 1
     assert asms[0].accession == "GCA_900706755.1"
 
-    nuc = NuccoreSummary(uid="123", accession_version="AB811596.1", title="E. coli O1", slen=12000, is_cps=False)
+    nuc = NuccoreSummary(uid="123", accession_version="AB811596.1", title="E. coli O1", slen=12000)
     pm = PubMedSummary(uid="15247885", title="Test", doi="10.1000/1")
     assert nuc.accession_version == "AB811596.1"
     assert pm.doi == "10.1000/1"
@@ -104,7 +89,7 @@ def test_client_instantiation_and_pathogenwatch_collection() -> None:
     ena = ENAClient()
     si = StrainInfoClient()
     bd = BacDiveClient(api_key="bdkey")
-    pw = PathogenwatchBaseClient(api_key="pwkey")
+    pw = PathogenwatchClient(api_key="pwkey")
     assert ncbi.api_key == "testkey"
     assert ena.base_url.endswith("/ena/portal/api")
     assert si.base_url.endswith("/v2")

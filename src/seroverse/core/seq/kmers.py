@@ -563,7 +563,7 @@ class FracMinHashIndex(BaseKmerIndex):
         cls,
         batch: Sequences,
         k: int | None = None,
-        alphabet: Alphabet | str = Alphabet.DNA,
+        alphabet: Alphabet = Alphabet.DNA,
         scaled: int = 100,
         canonical: bool | None = None,
         seed: int = 42,
@@ -578,7 +578,7 @@ class FracMinHashIndex(BaseKmerIndex):
         Args:
             batch (Sequences): Input sequence collection.
             k (int | None): K-mer length. Defaults to alphabet default_k.
-            alphabet (Alphabet | str): Alphabet instance or name. Defaults to Alphabet.DNA.
+            alphabet (Alphabet): Alphabet instance. Defaults to `Alphabet.DNA`.
             scaled (int): Sampling scale factor. Defaults to 100.
             canonical (bool | None): True if using canonical k-mers. Defaults to alphabet.supports_canonical.
             seed (int): Seed for hashing. Defaults to 42.
@@ -591,33 +591,24 @@ class FracMinHashIndex(BaseKmerIndex):
         Returns:
             FracMinHashIndex: Built [`FracMinHashIndex`][seroverse.core.seq.kmers.FracMinHashIndex] instance.
         """
-        if isinstance(alphabet, str):
-            alphabet_obj = (
-                Alphabet.MMSEQS12
-                if (reduce or alphabet == "mmseqs12")
-                else (Alphabet.AMINO if alphabet in ("amino", "amino_acid") else Alphabet.DNA)
-            )
-        else:
-            alphabet_obj = alphabet
-
         if len(batch) == 0:
             return cls.empty()
 
         n_seqs = len(batch)
-        if canonical is True and not alphabet_obj.supports_canonical:
-            raise ValueError(f"Canonical k-mers are not supported for alphabet {alphabet_obj}.")
+        if canonical is True and not alphabet.supports_canonical:
+            raise ValueError(f"Canonical k-mers are not supported for alphabet {alphabet}.")
 
-        resolved_canonical = alphabet_obj.supports_canonical if canonical is None else canonical
-        resolved_k = alphabet_obj.default_k if k is None else k
-        resolved_bits = alphabet_obj.bits_per_char if bits_per_char is None else bits_per_char
-        resolved_reduce = alphabet_obj is Alphabet.MMSEQS12 if reduce is None else reduce
+        resolved_canonical = alphabet.supports_canonical if canonical is None else canonical
+        resolved_k = alphabet.default_k if k is None else k
+        resolved_bits = alphabet.bits_per_char if bits_per_char is None else bits_per_char
+        resolved_reduce = alphabet is Alphabet.MMSEQS12 if reduce is None else reduce
 
         if resolved_k * resolved_bits > 64:
             raise ValueError(
                 f"k-mer size ({resolved_k}) with {resolved_bits} bits/char exceeds 64-bit integer capacity."
             )
 
-        kernel_lut = lut if lut is not None else alphabet_obj.kmer_lut
+        kernel_lut = lut if lut is not None else alphabet.kmer_lut
 
         counts = _count_fracminhash_kernel(
             batch.seqs, batch.offsets, batch.lengths, kernel_lut, resolved_k, scaled, resolved_canonical, resolved_bits
@@ -658,7 +649,7 @@ class FracMinHashIndex(BaseKmerIndex):
             n_seqs=n_seqs,
             is_sorted=sort_by_hash,
             k=resolved_k,
-            alphabet=alphabet_obj,
+            alphabet=alphabet,
             scaled=scaled,
             canonical=resolved_canonical,
             bits_per_char=resolved_bits,
@@ -727,7 +718,7 @@ class RandstrobeIndex(BaseKmerIndex):
         s: int = 5,
         w_min: int = 1,
         w_max: int = 5,
-        alphabet: Alphabet | str = Alphabet.MMSEQS12,
+        alphabet: Alphabet = Alphabet.MMSEQS12,
         seed: int = 42,
         sort_by_hash: bool = False,
         lut: np.ndarray[tuple[int], np.dtype[np.uint8]] | None = None,
@@ -742,7 +733,7 @@ class RandstrobeIndex(BaseKmerIndex):
             s (int): Sub-k-mer size. Defaults to 5.
             w_min (int): Min syncmer window bound. Defaults to 1.
             w_max (int): Max syncmer window bound. Defaults to 5.
-            alphabet (Alphabet | str): Alphabet instance or name. Defaults to Alphabet.MMSEQS12.
+            alphabet (Alphabet): Alphabet instance. Defaults to `Alphabet.MMSEQS12`.
             seed (int): Random seed. Defaults to 42.
             sort_by_hash (bool): True to sort records by hash. Defaults to False.
             lut (np.ndarray | None): Optional alphabet lookup table.
@@ -761,17 +752,8 @@ class RandstrobeIndex(BaseKmerIndex):
         if len(batch) == 0:
             return cls.empty()
 
-        if isinstance(alphabet, str):
-            alphabet_obj = (
-                Alphabet.MMSEQS12
-                if (reduce is not False and alphabet in ("mmseqs12", "amino_acid", "amino"))
-                else (Alphabet.DNA if alphabet == "dna" else Alphabet.AMINO)
-            )
-        else:
-            alphabet_obj = alphabet
-
-        resolved_reduce = alphabet_obj is Alphabet.MMSEQS12 if reduce is None else reduce
-        kernel_lut = lut if lut is not None else alphabet_obj.kmer_lut
+        resolved_reduce = alphabet is Alphabet.MMSEQS12 if reduce is None else reduce
+        kernel_lut = lut if lut is not None else alphabet.kmer_lut
 
         counts = _count_randstrobes_kernel(batch.seqs, batch.offsets, batch.lengths, kernel_lut, k, s, w_min)
         total_randstrobes = int(np.sum(counts))
@@ -810,7 +792,7 @@ class RandstrobeIndex(BaseKmerIndex):
             n_seqs=len(batch),
             is_sorted=sort_by_hash,
             k=k,
-            alphabet=alphabet_obj,
+            alphabet=alphabet,
             s=s,
             w_min=w_min,
             w_max=w_max,

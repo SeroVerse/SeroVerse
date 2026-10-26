@@ -53,7 +53,7 @@ class Alphabet:
     bits_per_char: int = 0
     default_k: int = 0
     supports_canonical: bool = False
-    name: str | None = None
+    name: bytes | None = None
     kmer_lut: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
         default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
     )
@@ -72,37 +72,19 @@ class Alphabet:
 
     def __new__(
         cls,
-        symbols: bytes | str,
-        complement: bytes | str | None = None,
-        aliases: Mapping[bytes | str, bytes | str] | None = None,
-        groups: Mapping[bytes | str, Iterable[bytes | str]] | None = None,
+        symbols: bytes,
+        complement: bytes | None = None,
+        aliases: Mapping[bytes, bytes] | None = None,
+        groups: Mapping[bytes, Iterable[bytes]] | None = None,
         default_k: int | None = None,
         supports_canonical: bool | None = None,
-        name: str | None = None,
+        name: bytes | None = None,
     ) -> Self:
         r"""Create or return a cached singleton instance of an Alphabet."""
-        sym_bytes = (symbols.encode("ascii") if isinstance(symbols, str) else symbols).upper()
-        comp_bytes = (
-            (complement.encode("ascii") if isinstance(complement, str) else complement).upper()
-            if complement is not None
-            else None
-        )
-
-        norm_aliases: dict[bytes, bytes] | None = None
-        if aliases:
-            norm_aliases = {
-                (k.encode("ascii") if isinstance(k, str) else k): (v.encode("ascii") if isinstance(v, str) else v)
-                for k, v in aliases.items()
-            }
-
-        norm_groups: dict[bytes, tuple[bytes, ...]] | None = None
-        if groups:
-            norm_groups = {
-                (k.encode("ascii") if isinstance(k, str) else k): tuple(
-                    x.encode("ascii") if isinstance(x, str) else x for x in v
-                )
-                for k, v in groups.items()
-            }
+        sym_bytes = symbols.upper()
+        comp_bytes = complement.upper() if complement is not None else None
+        norm_aliases = dict(aliases) if aliases else None
+        norm_groups = {k: tuple(v) for k, v in groups.items()} if groups else None
 
         bits_per_char = (len(sym_bytes) - 1).bit_length()
         resolved_k = default_k if default_k is not None else (21 if bits_per_char <= 2 else 7)
@@ -144,7 +126,7 @@ class Alphabet:
         groups: dict[bytes, tuple[bytes, ...]] | None,
         default_k: int,
         supports_canonical: bool,
-        name: str | None = None,
+        name: bytes | None = None,
     ) -> None:
         r"""Internal initialization for building lookup tables and properties."""
         if not symbols.isascii():
@@ -169,29 +151,32 @@ class Alphabet:
                 rep_byte = rep[0]
                 for m in members:
                     m_byte = m[0]
+                    m_lower = m_byte | 0x20
                     kmer_lut[m_byte] = idx
-                    kmer_lut[ord(chr(m_byte).lower())] = idx
+                    kmer_lut[m_lower] = idx
                     ascii_lut[m_byte] = rep_byte
-                    ascii_lut[ord(chr(m_byte).lower())] = rep_byte
+                    ascii_lut[m_lower] = rep_byte
         else:
             # Standard alphabet mapping
             for idx, b in enumerate(symbols):
+                b_lower = b | 0x20
                 kmer_lut[b] = idx
-                kmer_lut[ord(chr(b).lower())] = idx
+                kmer_lut[b_lower] = idx
                 ascii_lut[b] = b
-                ascii_lut[ord(chr(b).lower())] = b
+                ascii_lut[b_lower] = b
 
         # Apply Aliases
         if aliases:
             for src, dst in aliases.items():
                 src_b = src[0]
+                src_lower = src_b | 0x20
                 dst_b = dst[0]
                 target_kmer_idx = kmer_lut[dst_b]
                 target_ascii = ascii_lut[dst_b]
                 kmer_lut[src_b] = target_kmer_idx
-                kmer_lut[ord(chr(src_b).lower())] = target_kmer_idx
+                kmer_lut[src_lower] = target_kmer_idx
                 ascii_lut[src_b] = target_ascii
-                ascii_lut[ord(chr(src_b).lower())] = target_ascii
+                ascii_lut[src_lower] = target_ascii
 
         kmer_lut.flags.writeable = False
         ascii_lut.flags.writeable = False
@@ -204,13 +189,13 @@ class Alphabet:
             comp_lut[ord("n")] = ord("n")
             for s, c in zip(symbols, complement, strict=False):
                 comp_lut[s] = c
-                comp_lut[ord(chr(s).lower())] = ord(chr(c).lower())
+                comp_lut[s | 0x20] = c | 0x20
             if aliases:
                 for src, dst in aliases.items():
                     src_b = src[0]
                     dst_b = dst[0]
                     comp_lut[src_b] = comp_lut[dst_b]
-                    comp_lut[ord(chr(src_b).lower())] = comp_lut[ord(chr(dst_b).lower())]
+                    comp_lut[src_b | 0x20] = comp_lut[dst_b | 0x20]
         else:
             comp_lut = np.arange(256, dtype=np.uint8)
         comp_lut.flags.writeable = False
@@ -231,25 +216,18 @@ class Alphabet:
         r"""Return the number of primary symbols in the alphabet."""
         return len(self.symbols)
 
-    def __contains__(self, item: bytes | str | int) -> bool:
-        r"""Check if a character or byte value is a valid member of this alphabet."""
-        if isinstance(item, int):
-            return 0 <= item < 256 and self.kmer_lut[item] < len(self.symbols)
-        if isinstance(item, str):
-            if len(item) != 1:
-                return False
-            item_val = ord(item)
-            return item_val < 256 and self.kmer_lut[item_val] < len(self.symbols)
+    def __contains__(self, item: bytes | int) -> bool:
+        r"""Check if a byte or integer byte value is a valid member of this alphabet."""
         if isinstance(item, bytes):
-            if len(item) != 1:
-                return False
-            return self.kmer_lut[item[0]] < len(self.symbols)
+            return len(item) == 1 and bool(self.kmer_lut[item[0]] < len(self.symbols))
+        if isinstance(item, int):
+            return 0 <= item < 256 and bool(self.kmer_lut[item] < len(self.symbols))
         return False
 
     def __repr__(self) -> str:
         r"""Return a clean string representation of the Alphabet."""
         if self.name:
-            return f"Alphabet.{self.name}"
+            return f"Alphabet.{self.name.decode('ascii', errors='replace')}"
         return f"Alphabet({self.symbols!r}, bits={self.bits_per_char})"
 
     def __eq__(self, other: object) -> bool:
@@ -338,7 +316,7 @@ Alphabet.DNA = Alphabet(
     aliases={b"U": b"T"},
     default_k=21,
     supports_canonical=True,
-    name="DNA",
+    name=b"DNA",
 )
 
 Alphabet.AMINO = Alphabet(
@@ -346,7 +324,7 @@ Alphabet.AMINO = Alphabet(
     aliases={b"X": b"A", b"B": b"D", b"Z": b"E", b"J": b"L"},
     default_k=7,
     supports_canonical=False,
-    name="AMINO",
+    name=b"AMINO",
 )
 
 Alphabet.MMSEQS12 = Alphabet(
@@ -375,7 +353,7 @@ Alphabet.MMSEQS12 = Alphabet(
     },
     default_k=7,
     supports_canonical=False,
-    name="MMSEQS12",
+    name=b"MMSEQS12",
 )
 
 
@@ -386,13 +364,13 @@ class GeneticCode:
 
     Attributes:
         table_id (int): NCBI translation table integer identifier.
-        name (str): Descriptive name of the genetic code.
+        name (bytes): Descriptive byte-string name of the genetic code.
         start_codons (frozenset[bytes]): Valid 3-base start codon byte triplets.
         stop_codons (frozenset[bytes]): Valid 3-base stop codon byte triplets.
     """
 
     table_id: int
-    name: str
+    name: bytes
     start_codons: frozenset[bytes]
     stop_codons: frozenset[bytes]
     _char_map: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
@@ -439,7 +417,7 @@ class GeneticCode:
     def __new__(
         cls,
         table_id: int,
-        name: str,
+        name: bytes,
         mapping: Mapping[bytes, bytes],
         start_codons: Iterable[bytes],
         stop_codons: Iterable[bytes],
@@ -460,7 +438,7 @@ class GeneticCode:
     def _init_code(
         self,
         table_id: int,
-        name: str,
+        name: bytes,
         mapping: Mapping[bytes, bytes],
         start_codons: frozenset[bytes],
         stop_codons: frozenset[bytes],
@@ -578,8 +556,8 @@ class GeneticCode:
         object.__setattr__(self, "rev_stop_log_priors_64", rev_stop_log_priors_64)
 
     @classmethod
-    def from_table(cls, table: int | str | GeneticCode) -> GeneticCode:
-        r"""Resolve a `GeneticCode` instance by NCBI translation table ID (`1, 11`) or name."""
+    def from_table(cls, table: int | bytes | GeneticCode) -> GeneticCode:
+        r"""Resolve a `GeneticCode` instance by NCBI translation table ID (`1, 11`) or byte-string name."""
         if isinstance(table, GeneticCode):
             return table
         if isinstance(table, int):
@@ -590,12 +568,12 @@ class GeneticCode:
             if table in by_id:
                 return by_id[table]
             raise AlphabetError(f"Unknown NCBI translation table ID: {table}. Supported: {sorted(by_id)}.")
-        key = table.strip().lower().replace("-", "_").replace(" ", "_")
+        key = table.strip().lower().replace(b"-", b"_").replace(b" ", b"_")
         by_name = {
-            "standard": cls.standard,
-            "1": cls.standard,
-            "bacterial": cls.bacterial,
-            "11": cls.bacterial,
+            b"standard": cls.standard,
+            b"1": cls.standard,
+            b"bacterial": cls.bacterial,
+            b"11": cls.bacterial,
         }
         if key in by_name:
             return by_name[key]
@@ -774,7 +752,7 @@ _STANDARD_CODON_MAPPING: dict[bytes, bytes] = {
 
 GeneticCode.standard = GeneticCode(
     table_id=1,
-    name="The Standard Code",
+    name=b"The Standard Code",
     mapping=_STANDARD_CODON_MAPPING,
     start_codons=(b"TTG", b"CTG", b"ATG"),
     stop_codons=(b"TAA", b"TAG", b"TGA"),
@@ -782,7 +760,7 @@ GeneticCode.standard = GeneticCode(
 
 GeneticCode.bacterial = GeneticCode(
     table_id=11,
-    name="Bacterial, Archaeal, and Plant Plastid",
+    name=b"Bacterial, Archaeal, and Plant Plastid",
     mapping=_STANDARD_CODON_MAPPING,
     start_codons=(b"TTG", b"CTG", b"ATT", b"ATC", b"ATA", b"ATG", b"GTG"),
     stop_codons=(b"TAA", b"TAG", b"TGA"),

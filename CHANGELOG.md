@@ -15,7 +15,7 @@ All notable changes to **`SeroVerse`** and the SeroVerse ecosystem are documente
   - `RandstrobeIndex` ($O(1)$ strobemer seeding) and `FracMinHashIndex` k-mer indices (`seroverse.core.seq.kmers`).
   - Vectorized unbanded/banded Smith-Waterman-Gotoh local and semi-global alignment (`PairwiseAligner` in `seroverse.core.seq.pairwise`).
   - Hybrid sequence + motif-rescued protein clustering (`Clusterer` supporting greedy incremental and sparse Markov Clustering `MCL` modes in `seroverse.core.seq.clustering`).
-  - Packed CSR directed multigraphs (`GraphModel`, `GraphBatch`), Consensus Pan-Graph compression (`GraphBatch.as_pan_graph`), Hungarian + L2-QP `GraphAligner`, branch-and-bound `maximum_spanning_arborescence`, `RelationalMPNN`, and Fruchterman-Reingold `LayoutEngine` (`seroverse.core.graph`).
+  - Packed CSR directed multigraphs (`Graph`, `Graphs`), Consensus Pan-Graph compression (`GraphBatch.as_pan_graph`), Hungarian + L2-QP `GraphAligner`, branch-and-bound `maximum_spanning_arborescence`, `RelationalMPNN`, and Fruchterman-Reingold `LayoutEngine` (`seroverse.core.graph`).
 - **Async Repository & Metadata Clients (`seroverse.client`)**:
   - Async token-bucket rate-limited HTTP client (`Client`) and `msgspec` cassette serialization (`cassette_context`, `encode_msgpack`, `decode_msgpack`, `load_msgpack`, `save_msgpack` in `seroverse.client.base`).
   - `NCBIClient` (`seroverse.client.ncbi`), `ENAClient` (`seroverse.client.ena`), `BacDiveClient` & `StrainInfoClient` (`seroverse.client.dsmz`), and `PathogenwatchBaseClient` (`seroverse.client.pathogenwatch`).

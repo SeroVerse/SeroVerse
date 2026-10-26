@@ -13,6 +13,7 @@ from typing import Any
 import msgspec
 
 from seroverse.client.base import Client
+from seroverse.progress import current_progress
 
 NCBI_EUTILS_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 NCBI_DATASETS_URL = "https://api.ncbi.nlm.nih.gov/datasets/v2"
@@ -133,8 +134,15 @@ class NCBIClient(Client):
     async def esummary(self, db: str, uids: Sequence[str], chunk_size: int = 200) -> dict[str, dict[str, Any]]:
         """Run batched `esummary.fcgi` POST requests and return `{uid: info_dict}`."""
         out: dict[str, dict[str, Any]] = {}
+        chunks = [uids[i : i + chunk_size] for i in range(0, len(uids), chunk_size)]
+        if not chunks:
+            return out
+        prog = current_progress()
+        completed = 0
+        total = len(chunks)
 
         async def _fetch_chunk(chunk: Sequence[str]) -> None:
+            nonlocal completed
             try:
                 data = self._eutils_params({"db": db, "id": ",".join(chunk)})
                 raw = await self.stream_bytes("POST", "esummary.fcgi", data=data)
@@ -145,10 +153,12 @@ class NCBIClient(Client):
                             out[u] = info
             except Exception:
                 pass
+            finally:
+                completed += 1
+                if prog.is_active:
+                    prog.report(completed / total, detail=f"NCBI esummary ({db}): batch {completed}/{total}")
 
-        chunks = [uids[i : i + chunk_size] for i in range(0, len(uids), chunk_size)]
-        if chunks:
-            await asyncio.gather(*[_fetch_chunk(c) for c in chunks])
+        await asyncio.gather(*[_fetch_chunk(c) for c in chunks])
         return out
 
     async def fetch_nuccore_summaries(
@@ -208,8 +218,12 @@ class NCBIClient(Client):
     async def elink_pubmed_to_nuccore(self, pmids: Sequence[int], batch_size: int = 40) -> dict[int, list[str]]:
         """Map PubMed IDs to linked `nuccore` UIDs via `elink.fcgi` (`pubmed_nuccore`)."""
         out: dict[int, list[str]] = {}
-        for i in range(0, len(pmids), batch_size):
-            batch = pmids[i : i + batch_size]
+        batches = [pmids[i : i + batch_size] for i in range(0, len(pmids), batch_size)]
+        if not batches:
+            return out
+        prog = current_progress()
+        total = len(batches)
+        for idx, batch in enumerate(batches, start=1):
             try:
                 params: list[tuple[str, str]] = [
                     ("dbfrom", "pubmed"),
@@ -240,6 +254,9 @@ class NCBIClient(Client):
                         out[pmid] = uids
             except Exception:
                 pass
+            finally:
+                if prog.is_active:
+                    prog.report(idx / total, detail=f"NCBI elink: batch {idx}/{total}")
         return out
 
     async def efetch_fasta(self, uids: Sequence[str], db: str = "nuccore") -> bytes:

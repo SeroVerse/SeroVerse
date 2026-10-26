@@ -1,7 +1,7 @@
 ---
 title: seroverse.client
 subtitle: Async Rate-Limited Repository Clients
-description: "API reference for seroverse.client: Client, cassette_context, NCBIClient, ENAClient, BacDiveClient, StrainInfoClient, and PathogenwatchBaseClient."
+description: "API reference for seroverse.client: Client, cassette_context, NCBIClient, ENAClient, BacDiveClient, StrainInfoClient, and PathogenwatchClient."
 author: Tom Stanton
 icon: lucide/cloud-download
 comments: true

@@ -4,64 +4,16 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import cache
-from typing import Any, Protocol, Self
+from typing import Any, Self, cast, overload
 
 import numpy as np
-import scipy.linalg as linalg
 from numba import njit, prange
-from scipy.sparse import csgraph, csr_array
-from scipy.stats import wasserstein_distance
 
 from seroverse.core.collections import BatchedContainer, ScalarView
+from seroverse.core.graph.csr import CSR, RelationalCSR
 
 # Constants ------------------------------------------------------------------------------------------------------------
 TAG_EDGE: int = 1 << 31  # 0x80000000 (Bit 31 discriminator for injected edge nodes)
-
-
-@njit(cache=True, nogil=True, parallel=True)
-def _slice_graph_batch_kernel(
-    kept_indices: np.ndarray,
-    node_types: np.ndarray,
-    node_offsets: np.ndarray,
-    edge_sources: np.ndarray,
-    edge_targets: np.ndarray,
-    edge_types: np.ndarray,
-    edge_offsets: np.ndarray,
-    new_node_offsets: np.ndarray,
-    new_edge_offsets: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Gather nodes and rebase edges in parallel across selected graphs in a `GraphBatch`."""
-    num_kept = len(kept_indices)
-    total_nodes = int(new_node_offsets[num_kept])
-    total_edges = int(new_edge_offsets[num_kept])
-
-    new_nodes = np.empty(total_nodes, dtype=np.uint32)
-    new_sources = np.empty(total_edges, dtype=np.uint32)
-    new_targets = np.empty(total_edges, dtype=np.uint32)
-    new_types = np.empty(total_edges, dtype=np.uint32)
-
-    for out_i in prange(num_kept):
-        orig_i = kept_indices[out_i]
-        m_start = int(node_offsets[orig_i])
-        m_end = int(node_offsets[orig_i + 1])
-        n_nodes = m_end - m_start
-        dst_m_start = int(new_node_offsets[out_i])
-
-        for j in range(n_nodes):
-            new_nodes[dst_m_start + j] = node_types[m_start + j]
-
-        e_start = int(edge_offsets[orig_i])
-        e_end = int(edge_offsets[orig_i + 1])
-        n_edges = e_end - e_start
-        dst_e_start = int(new_edge_offsets[out_i])
-        local_shift = dst_m_start - m_start
-
-        for j in range(n_edges):
-            new_sources[dst_e_start + j] = np.uint32(int(edge_sources[e_start + j]) + local_shift)
-            new_targets[dst_e_start + j] = np.uint32(int(edge_targets[e_start + j]) + local_shift)
-            new_types[dst_e_start + j] = edge_types[e_start + j]
-
-    return new_nodes, new_sources, new_targets, new_types
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
@@ -106,7 +58,7 @@ class BitField:
         return (int(instance) >> self.shift) & self.max_val
 
 
-class GraphNode(ABC):
+class NodeBase(ABC):
     """Abstract base protocol for all core nodes."""
 
     @property
@@ -121,7 +73,7 @@ class GraphNode(ABC):
         return bool(self.type_id & TAG_EDGE)
 
 
-class IntNode(int, GraphNode):
+class IntNode(int, NodeBase):
     """Base model for core nodes represented as bit-packed primitive integers.
 
     Inherits from Python's built-in `int` and `GraphNode`, enabling zero-allocation
@@ -207,8 +159,8 @@ class IntNode(int, GraphNode):
 
 
 @dataclass(slots=True, frozen=True)
-class DirectedEdge(ABC):
-    """Abstract base class for all directed core edges."""
+class DirectedEdge:
+    """Base class for all directed core edges."""
 
     source: int
     target: int
@@ -221,28 +173,23 @@ class DirectedEdge(ABC):
             )
 
 
-class GraphModel(ScalarView, Protocol):
+@dataclass(slots=True, frozen=True)
+class Graph(ScalarView):
     """
-    Protocol and mixin providing core topological algorithms to scalar views representing graphs.
-    Requires concrete `@dataclass(slots=True, frozen=True)` classes to provide `nodes` and `edges`.
+    Scalar view and topological model representing a single directed graph.
+    Provides sparse CSR conversion, multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR]
+    construction, Laplacian spectrum calculation, and 1-Wasserstein spectral distance.
     """
 
-    @property
-    def nodes(self) -> Sequence[Any]:
-        """Ordered sequence of graph nodes."""
-        ...
-
-    @property
-    def edges(self) -> Sequence[DirectedEdge]:
-        """Ordered sequence of directed edges connecting `nodes`."""
-        ...
+    nodes: tuple[Any, ...] = ()
+    edges: tuple[DirectedEdge, ...] = ()
 
     @cache  # noqa: B019
     def as_graph(
         self,
         as_bipartite: bool = False,
         symmetrize: bool = False,
-    ) -> tuple[csr_array, np.ndarray[tuple[int], np.dtype[np.uint32]]]:
+    ) -> tuple[CSR, np.ndarray[tuple[int], np.dtype[np.uint32]]]:
         """
         Builds a sparse CSR adjacency matrix and node label array.
 
@@ -272,14 +219,14 @@ class GraphModel(ScalarView, Protocol):
         total_nodes = num_primary + num_edges if as_bipartite else num_primary
 
         if total_nodes == 0:
-            return csr_array((0, 0), dtype=np.uint32), np.empty(0, dtype=np.uint32)
+            return CSR.empty((0, 0), dtype=np.uint32), np.empty(0, dtype=np.uint32)
 
         labels = np.empty(total_nodes, dtype=np.uint32)
         for i, node in enumerate(nodes):
             labels[i] = node.type_id if hasattr(node, "type_id") else int(node)
 
         if num_edges == 0:
-            return csr_array((total_nodes, total_nodes), dtype=np.uint32), labels
+            return CSR.empty((total_nodes, total_nodes), dtype=np.uint32), labels
 
         sources = np.fromiter((e.source for e in edges), dtype=np.uint32, count=num_edges)
         targets = np.fromiter((e.target for e in edges), dtype=np.uint32, count=num_edges)
@@ -307,53 +254,51 @@ class GraphModel(ScalarView, Protocol):
                 cols = np.concatenate([targets, sources])
                 data = np.concatenate([edge_types, edge_types])
 
-        adj = csr_array((data, (rows, cols)), shape=(total_nodes, total_nodes), dtype=np.uint32)
+        adj = CSR.from_coo(rows, cols, data, shape=(total_nodes, total_nodes), dtype=np.uint32)
         return adj, labels
 
-    @property
-    def num_nodes(self) -> int:
-        return len(self.nodes)
-
-    @property
-    def num_edges(self) -> int:
-        return len(self.edges)
+    def as_relational_csr(
+        self,
+        *,
+        include_2hop: bool = True,
+        add_virtual_pool: bool = True,
+    ) -> RelationalCSR:
+        """Build a multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR] for this graph."""
+        return RelationalCSR.from_graph(
+            self,
+            include_2hop=include_2hop,
+            add_virtual_pool=add_virtual_pool,
+        )
 
     def __len__(self) -> int:
-        return self.num_nodes
+        return len(self.nodes)
 
     @cache  # noqa: B019
     def laplacian_spectrum(self) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
         """
         Computes the continuous topological spectrum of the core.
 
-        Constructs the unweighted, symmetrized adjacency matrix, computes the
-        normalized core Laplacian using :func:`scipy.sparse.csgraph.laplacian`,
-        and solves for the sorted eigenvalues using :func:`scipy.linalg.eigvalsh`.
+        Constructs the unweighted, symmetrized normalized core Laplacian via
+        [`CSR.laplacian`][seroverse.core.graph.csr.CSR.laplacian] and solves for the sorted
+        eigenvalues using :func:`numpy.linalg.eigvalsh`.
 
         Returns:
             A 1D sorted NumPy array of eigenvalues (`np.ndarray[tuple[int], np.dtype[np.float64]]`).
         """
         adj, _ = self.as_graph(as_bipartite=False)
         if adj.shape[0] == 0:
-            return np.array([], dtype=np.float64)
+            return np.empty(0, dtype=np.float64)
 
-        adj_unweighted = adj.astype(np.float64)
-        adj_unweighted.data.fill(1.0)
-        adj_sym = adj_unweighted + adj_unweighted.T
-        adj_sym.data.fill(1.0)
+        L_dense = adj.laplacian(normed=True, symmetrize_unweighted=True)
+        return np.sort(np.linalg.eigvalsh(L_dense))
 
-        L = csgraph.laplacian(adj_sym, normed=True)
-        L_dense = np.asarray(L.toarray() if hasattr(L, "toarray") else L, dtype=np.float64)
-        eigenvalues = linalg.eigvalsh(L_dense)
-        return np.sort(eigenvalues)
-
-    def spectral_distance(self, other: GraphModel) -> float:
+    def spectral_distance(self, other: Graph) -> float:
         """
         Computes the topological Wasserstein Distance (Earth Mover's Distance)
         between this core model and another, comparing skeletal shapes.
 
         Extracts the Laplacian spectra from both graphs and computes their
-        Wasserstein-1 distance using :func:`scipy.stats.wasserstein_distance`.
+        Wasserstein-1 distance via a compiled Numba 1D optimal transport kernel.
 
         Args:
             other: Another GraphModel instance to compare against.
@@ -363,16 +308,14 @@ class GraphModel(ScalarView, Protocol):
         """
         spec1 = self.laplacian_spectrum()
         spec2 = other.laplacian_spectrum()
-        if len(spec1) == 0 or len(spec2) == 0:
-            return 0.0 if len(spec1) == len(spec2) else 1.0
-        return float(wasserstein_distance(spec1, spec2))
+        return float(_wasserstein_1d_sorted_kernel(spec1, spec2))
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({len(self.nodes)} nodes, {len(self.edges)} edges)"
 
 
 @dataclass(slots=True, frozen=True)
-class GraphBatch[T: GraphModel, S: GraphBatch[Any, Any]](BatchedContainer[T, S]):
+class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedContainer[T, S]):
     """
     Base Structure-of-Arrays (SoA) container for batched graph datasets.
     Provides block-diagonal CSR adjacency, Wasserstein spectral distance matrices,
@@ -388,10 +331,6 @@ class GraphBatch[T: GraphModel, S: GraphBatch[Any, Any]](BatchedContainer[T, S])
 
     def __len__(self) -> int:
         return len(self.node_offsets) - 1
-
-    @property
-    def num_graphs(self) -> int:
-        return len(self)
 
     @property
     def total_nodes(self) -> int:
@@ -442,7 +381,169 @@ class GraphBatch[T: GraphModel, S: GraphBatch[Any, Any]](BatchedContainer[T, S])
             edge_offsets=e_offs,
         )
 
-    def get_block_diagonal_graph(self, unweighted: bool = False) -> csr_array:
+    @classmethod
+    def from_list(cls, graphs: Sequence[Graph]) -> Self:
+        """Pack a sequence of [`GraphModel`][seroverse.core.graph.models.GraphModel] instances into a `GraphBatch`."""
+        n_graphs = len(graphs)
+        if n_graphs == 0:
+            return cls.empty()
+
+        node_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
+        edge_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
+        tot_nodes = sum(len(g.nodes) for g in graphs)
+        tot_edges = sum(len(g.edges) for g in graphs)
+
+        node_types = np.empty(tot_nodes, dtype=np.uint32)
+        edge_sources = np.empty(tot_edges, dtype=np.uint32)
+        edge_targets = np.empty(tot_edges, dtype=np.uint32)
+        edge_types = np.empty(tot_edges, dtype=np.uint32)
+
+        curr_n = 0
+        curr_e = 0
+        for i, g in enumerate(graphs):
+            gn = len(g.nodes)
+            ge = len(g.edges)
+            for j, node in enumerate(g.nodes):
+                node_types[curr_n + j] = node.type_id if hasattr(node, "type_id") else int(node)
+            for j, edge in enumerate(g.edges):
+                edge_sources[curr_e + j] = edge.source + curr_n
+                edge_targets[curr_e + j] = edge.target + curr_n
+                edge_types[curr_e + j] = int(edge.edge_type)
+            curr_n += gn
+            curr_e += ge
+            node_offsets[i + 1] = curr_n
+            edge_offsets[i + 1] = curr_e
+
+        return cls(
+            node_types=node_types,
+            node_offsets=node_offsets,
+            edge_sources=edge_sources,
+            edge_targets=edge_targets,
+            edge_types=edge_types,
+            edge_offsets=edge_offsets,
+        )
+
+    @classmethod
+    def random(
+        cls,
+        n_graphs: int = 10,
+        n_nodes: int | tuple[int, int] = (5, 15),
+        p: float = 0.25,
+        *,
+        n_node_types: int = 8,
+        n_edge_types: int = 4,
+        directed: bool = True,
+        allow_self_loops: bool = False,
+        rng: np.random.Generator | int | None = None,
+    ) -> Self:
+        r"""Generate a random [`GraphBatch`][seroverse.core.graph.models.GraphBatch] using the Erdős–Rényi $G(n, p)$ model.
+
+        Args:
+            n_graphs: Number of graphs in the batch (`n_graphs >= 0`). Defaults to `10`.
+            n_nodes: Either a fixed integer node count per graph or an inclusive `(min_nodes, max_nodes)`
+                2-tuple sampled uniformly per graph. Defaults to `(5, 15)`.
+            p: Edge inclusion probability $p \in [0, 1]$. Defaults to `0.25`.
+            n_node_types: Number of distinct integer node types sampled uniformly in `[1, n_node_types]`. Defaults to `8`.
+            n_edge_types: Number of distinct integer edge types sampled uniformly in `[1, n_edge_types]`. Defaults to `4`.
+            directed: If `True` (default), generates independent directed edges $(u \to v)$. If `False`,
+                generates symmetric undirected edges $(u \leftrightarrow v)$.
+            allow_self_loops: If `True`, permits self-loops $(u \to u)$. Defaults to `False`.
+            rng: Optional `np.random.Generator`, integer seed, or `None` passed to `np.random.default_rng`.
+
+        Returns:
+            Self: A newly generated `GraphBatch` instance.
+        """
+        if n_graphs < 0:
+            raise ValueError(f"n_graphs must be >= 0; got {n_graphs}.")
+        if not (0.0 <= p <= 1.0):
+            raise ValueError(f"Edge probability p must be in [0.0, 1.0]; got {p}.")
+        if n_node_types < 1 or n_edge_types < 1:
+            raise ValueError(f"n_node_types ({n_node_types}) and n_edge_types ({n_edge_types}) must be >= 1.")
+        if n_graphs == 0:
+            return cls.empty()
+
+        gen = np.random.default_rng(rng)
+        if isinstance(n_nodes, (int, np.integer)):
+            if int(n_nodes) < 0:
+                raise ValueError(f"n_nodes must be >= 0; got {n_nodes}.")
+            node_lens = np.full(n_graphs, int(n_nodes), dtype=np.uint32)
+        else:
+            min_n, max_n = int(n_nodes[0]), int(n_nodes[1])
+            if min_n < 0 or max_n < min_n:
+                raise ValueError(f"Invalid n_nodes range ({min_n}, {max_n}); require 0 <= min_nodes <= max_nodes.")
+            node_lens = gen.integers(min_n, max_n + 1, size=n_graphs, dtype=np.uint32)
+
+        node_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
+        np.cumsum(node_lens, dtype=np.uint32, out=node_offsets[1:])
+        total_nodes = int(node_offsets[-1])
+        node_types = gen.integers(1, n_node_types + 1, size=total_nodes, dtype=np.uint32)
+
+        seed = np.uint64(gen.integers(1, (1 << 63) - 1, dtype=np.uint64))
+        edge_sources, edge_targets, edge_types, edge_offsets = _erdos_renyi_edges_kernel(
+            node_offsets,
+            float(p),
+            int(n_edge_types),
+            bool(directed),
+            bool(allow_self_loops),
+            seed,
+        )
+        return cls(
+            node_types=node_types,
+            node_offsets=node_offsets,
+            edge_sources=edge_sources,
+            edge_targets=edge_targets,
+            edge_types=edge_types,
+            edge_offsets=edge_offsets,
+        )
+
+    @overload
+    def __getitem__(self, item: int | np.integer[Any]) -> T: ...
+
+    @overload
+    def __getitem__(self, item: slice | np.ndarray[tuple[int], Any] | list[Any]) -> S: ...
+
+    @overload
+    def __getitem__(self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]) -> T | S: ...
+
+    def __getitem__(self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]) -> T | S:
+        """Extract a single [`GraphModel`][seroverse.core.graph.models.GraphModel] by integer index, or a sub-batch by slice/mask/indices."""
+        if isinstance(item, (int, np.integer)):
+            idx = int(item)
+            n_graphs = len(self)
+            if idx < 0:
+                idx += n_graphs
+            if idx < 0 or idx >= n_graphs:
+                raise IndexError(f"GraphBatch index {item} out of bounds for batch of length {n_graphs}.")
+            n_s, n_e = int(self.node_offsets[idx]), int(self.node_offsets[idx + 1])
+            e_s, e_e = int(self.edge_offsets[idx]), int(self.edge_offsets[idx + 1])
+            nodes = tuple(int(x) for x in self.node_types[n_s:n_e])
+            edges = tuple(
+                DirectedEdge(
+                    source=int(self.edge_sources[k]) - n_s,
+                    target=int(self.edge_targets[k]) - n_s,
+                    edge_type=int(self.edge_types[k]),
+                )
+                for k in range(e_s, e_e)
+            )
+            return cast(T, Graph(nodes=nodes, edges=edges))
+
+        indices = self._normalize_indices(item)
+        if len(indices) == 0:
+            return cast(S, self.empty())
+        nodes_arr, n_offs, sources, targets, types, e_offs = self._slice_soa_arrays(indices)
+        return cast(
+            S,
+            self.__class__(
+                node_types=nodes_arr,
+                node_offsets=n_offs,
+                edge_sources=sources,
+                edge_targets=targets,
+                edge_types=types,
+                edge_offsets=e_offs,
+            ),
+        )
+
+    def get_block_diagonal_graph(self, unweighted: bool = False) -> CSR:
         """
         Returns a single disconnected CSR core representing the entire batch.
 
@@ -455,60 +556,48 @@ class GraphBatch[T: GraphModel, S: GraphBatch[Any, Any]](BatchedContainer[T, S])
         """
         N = len(self.node_types)
         if N == 0 or len(self.edge_sources) == 0:
-            return csr_array((N, N), dtype=np.uint32)
+            return CSR.empty((N, N), dtype=np.uint32)
 
         weights = np.ones(len(self.edge_types), dtype=np.uint32) if unweighted else self.edge_types
-        return csr_array((weights, (self.edge_sources, self.edge_targets)), shape=(N, N), dtype=np.uint32)
+        return CSR.from_coo(self.edge_sources, self.edge_targets, weights, shape=(N, N), dtype=np.uint32)
+
+    def as_relational_csr(
+        self,
+        edge_orientations: Sequence[int] | np.ndarray | None = None,
+        *,
+        include_2hop: bool = True,
+        add_virtual_pool: bool = True,
+    ) -> RelationalCSR:
+        """Build a multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR] for this batch."""
+        return RelationalCSR.from_batch(
+            self,
+            edge_orientations=edge_orientations,
+            include_2hop=include_2hop,
+            add_virtual_pool=add_virtual_pool,
+        )
 
     def spectral_distance_matrix(self) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """
         Computes the all-vs-all continuous topological distance matrix across the batch.
 
-        Extracts per-core Laplacian spectra from the block-diagonal CSR core via
-        :func:`scipy.sparse.csgraph.laplacian` and :func:`scipy.linalg.eigvalsh`, then
-        computes pairwise Wasserstein distances using :func:`scipy.stats.wasserstein_distance`.
+        Extracts per-core normalized Laplacian spectra and computes pairwise
+        Wasserstein-1 distances in parallel using compiled Numba kernels.
 
         Returns:
             A dense symmetric matrix (N x N) of Wasserstein distances (`np.ndarray[tuple[int, int], np.dtype[np.float64]]`).
         """
-        N = len(self)
-        dist_matrix = np.zeros((N, N), dtype=np.float64)
-        if N == 0:
-            return dist_matrix
-
-        adj_full = self.get_block_diagonal_graph(unweighted=True)
-        spectra = []
-        for i in range(N):
-            m_start, m_end = self.node_offsets[i], self.node_offsets[i + 1]
-            if m_start == m_end:
-                spectra.append(np.array([], dtype=np.float64))
-                continue
-
-            adj_sub = adj_full[m_start:m_end, m_start:m_end]
-            adj_sub = adj_sub + adj_sub.T
-            adj_sub.data = np.ones_like(adj_sub.data)
-
-            L = csgraph.laplacian(adj_sub.astype(np.float64), normed=True)
-            L_dense = np.asarray(L.toarray() if hasattr(L, "toarray") else L, dtype=np.float64)
-            eigenvalues = linalg.eigvalsh(L_dense)
-            spectra.append(np.sort(eigenvalues))
-
-        for i in range(N):
-            for j in range(i + 1, N):
-                if len(spectra[i]) == 0 or len(spectra[j]) == 0:
-                    d = 0.0 if len(spectra[i]) == len(spectra[j]) else 1.0
-                else:
-                    d = float(wasserstein_distance(spectra[i], spectra[j]))
-                dist_matrix[i, j] = d
-                dist_matrix[j, i] = d
-
-        return dist_matrix
+        return _batch_spectral_distance_matrix_kernel(
+            self.node_offsets,
+            self.edge_sources,
+            self.edge_targets,
+            self.edge_offsets,
+        )
 
     def as_pan_graph(
         self,
         node_mask: int | None = None,
     ) -> tuple[
-        csr_array,
+        CSR,
         np.ndarray[tuple[int], np.dtype[np.uint32]],
         np.ndarray[tuple[int], np.dtype[np.uint32]],
     ]:
@@ -533,26 +622,26 @@ class GraphBatch[T: GraphModel, S: GraphBatch[Any, Any]](BatchedContainer[T, S])
         """
         N = len(self.node_types)
         if N == 0:
-            return csr_array((0, 0), dtype=np.uint32), np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.uint32)
+            return CSR.empty((0, 0), dtype=np.uint32), np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.uint32)
 
         masked_types = (self.node_types & node_mask) if node_mask is not None else self.node_types
         pan_nodes, inverse_indices, node_counts = np.unique(masked_types, return_inverse=True, return_counts=True)
         num_pan_nodes = len(pan_nodes)
 
         if len(self.edge_sources) == 0:
-            return csr_array((num_pan_nodes, num_pan_nodes), dtype=np.uint32), pan_nodes, node_counts.astype(np.uint32)
+            return CSR.empty((num_pan_nodes, num_pan_nodes), dtype=np.uint32), pan_nodes, node_counts.astype(np.uint32)
 
         p_src = inverse_indices[self.edge_sources]
         p_tgt = inverse_indices[self.edge_targets]
 
-        edge_pairs = np.column_stack([p_src, p_tgt])
-        unique_edges, edge_counts = np.unique(edge_pairs, axis=0, return_counts=True)
-
-        rows = unique_edges[:, 0]
-        cols = unique_edges[:, 1]
-        data = edge_counts.astype(np.uint32)
-
-        adj = csr_array((data, (rows, cols)), shape=(num_pan_nodes, num_pan_nodes), dtype=np.uint32)
+        adj = CSR.from_coo(
+            p_src,
+            p_tgt,
+            np.ones(len(p_src), dtype=np.uint32),
+            shape=(num_pan_nodes, num_pan_nodes),
+            dtype=np.uint32,
+            sum_duplicates=True,
+        )
         return adj, pan_nodes, node_counts.astype(np.uint32)
 
     def _slice_soa_arrays(
@@ -681,3 +770,260 @@ class GraphBatch[T: GraphModel, S: GraphBatch[Any, Any]](BatchedContainer[T, S])
         return (
             f"{self.__class__.__name__}({len(self):,} items | {self.total_nodes:,} nodes, {self.total_edges:,} edges)"
         )
+
+
+# Kernels --------------------------------------------------------------------------------------------------------------
+@njit(cache=True, nogil=True)
+def _wasserstein_1d_sorted_kernel(u: np.ndarray, v: np.ndarray) -> float:
+    """Compute exact 1-Wasserstein distance between two pre-sorted 1D empirical distributions."""
+    n = len(u)
+    m = len(v)
+    if n == 0 or m == 0:
+        return 0.0 if n == m else 1.0
+
+    inv_n = 1.0 / float(n)
+    inv_m = 1.0 / float(m)
+    i = 0
+    j = 0
+    dist = 0.0
+    curr_x = u[0] if u[0] < v[0] else v[0]
+
+    while i < n or j < m:
+        while i < n and u[i] <= curr_x:
+            i += 1
+        while j < m and v[j] <= curr_x:
+            j += 1
+        if i >= n and j >= m:
+            break
+        if i < n and j < m:
+            next_x = u[i] if u[i] < v[j] else v[j]
+        elif i < n:
+            next_x = u[i]
+        else:
+            next_x = v[j]
+        dist += abs(float(i) * inv_n - float(j) * inv_m) * (next_x - curr_x)
+        curr_x = next_x
+
+    return dist
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _batch_spectral_distance_matrix_kernel(
+    node_offsets: np.ndarray,
+    edge_sources: np.ndarray,
+    edge_targets: np.ndarray,
+    edge_offsets: np.ndarray,
+) -> np.ndarray:
+    """Compute per-graph normalized Laplacian spectra and pairwise 1-Wasserstein distance matrix in parallel."""
+    n_graphs = len(node_offsets) - 1
+    dist_matrix = np.zeros((n_graphs, n_graphs), dtype=np.float64)
+    if n_graphs == 0:
+        return dist_matrix
+
+    total_nodes = int(node_offsets[n_graphs])
+    all_spectra = np.zeros(total_nodes, dtype=np.float64)
+
+    for g in prange(n_graphs):
+        m_start = int(node_offsets[g])
+        m_end = int(node_offsets[g + 1])
+        n_v = m_end - m_start
+        if n_v == 0:
+            continue
+
+        lap = np.zeros((n_v, n_v), dtype=np.float64)
+        e_start = int(edge_offsets[g])
+        e_end = int(edge_offsets[g + 1])
+        for k in range(e_start, e_end):
+            u = int(edge_sources[k]) - m_start
+            v = int(edge_targets[k]) - m_start
+            if 0 <= u < n_v and 0 <= v < n_v and u != v:
+                lap[u, v] = 1.0
+                lap[v, u] = 1.0
+
+        deg = np.zeros(n_v, dtype=np.float64)
+        inv_sqrt = np.zeros(n_v, dtype=np.float64)
+        for u in range(n_v):
+            s = 0.0
+            for v in range(n_v):
+                s += lap[u, v]
+            deg[u] = s
+            if s > 0.0:
+                inv_sqrt[u] = 1.0 / np.sqrt(s)
+
+        for u in range(n_v):
+            du = inv_sqrt[u]
+            for v in range(n_v):
+                if u == v:
+                    lap[u, u] = 1.0 if deg[u] > 0.0 else 0.0
+                elif lap[u, v] != 0.0:
+                    lap[u, v] = -lap[u, v] * du * inv_sqrt[v]
+
+        eigs = np.linalg.eigvalsh(lap)
+        for u in range(n_v):
+            all_spectra[m_start + u] = eigs[u]
+
+    for i in prange(n_graphs):
+        s_i = int(node_offsets[i])
+        e_i = int(node_offsets[i + 1])
+        spec_i = all_spectra[s_i:e_i]
+        for j in range(i + 1, n_graphs):
+            s_j = int(node_offsets[j])
+            e_j = int(node_offsets[j + 1])
+            d = _wasserstein_1d_sorted_kernel(spec_i, all_spectra[s_j:e_j])
+            dist_matrix[i, j] = d
+            dist_matrix[j, i] = d
+
+    return dist_matrix
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _slice_graph_batch_kernel(
+    kept_indices: np.ndarray,
+    node_types: np.ndarray,
+    node_offsets: np.ndarray,
+    edge_sources: np.ndarray,
+    edge_targets: np.ndarray,
+    edge_types: np.ndarray,
+    edge_offsets: np.ndarray,
+    new_node_offsets: np.ndarray,
+    new_edge_offsets: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Gather nodes and rebase edges in parallel across selected graphs in a `GraphBatch`."""
+    num_kept = len(kept_indices)
+    total_nodes = int(new_node_offsets[num_kept])
+    total_edges = int(new_edge_offsets[num_kept])
+
+    new_nodes = np.empty(total_nodes, dtype=np.uint32)
+    new_sources = np.empty(total_edges, dtype=np.uint32)
+    new_targets = np.empty(total_edges, dtype=np.uint32)
+    new_types = np.empty(total_edges, dtype=np.uint32)
+
+    for out_i in prange(num_kept):
+        orig_i = kept_indices[out_i]
+        m_start = int(node_offsets[orig_i])
+        m_end = int(node_offsets[orig_i + 1])
+        n_nodes = m_end - m_start
+        dst_m_start = int(new_node_offsets[out_i])
+
+        for j in range(n_nodes):
+            new_nodes[dst_m_start + j] = node_types[m_start + j]
+
+        e_start = int(edge_offsets[orig_i])
+        e_end = int(edge_offsets[orig_i + 1])
+        n_edges = e_end - e_start
+        dst_e_start = int(new_edge_offsets[out_i])
+        local_shift = dst_m_start - m_start
+
+        for j in range(n_edges):
+            new_sources[dst_e_start + j] = np.uint32(int(edge_sources[e_start + j]) + local_shift)
+            new_targets[dst_e_start + j] = np.uint32(int(edge_targets[e_start + j]) + local_shift)
+            new_types[dst_e_start + j] = edge_types[e_start + j]
+
+    return new_nodes, new_sources, new_targets, new_types
+
+
+@njit(cache=True, nogil=True)
+def _erdos_renyi_edges_kernel(
+    node_offsets: np.ndarray,
+    p: float,
+    n_edge_types: int,
+    directed: bool,
+    allow_self_loops: bool,
+    seed: np.uint64,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Two-pass deterministic Erdős–Rényi edge generator across a ragged batch of graphs."""
+    n_graphs = len(node_offsets) - 1
+    edge_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
+    inv_u64 = 1.0 / 18446744073709551616.0  # 2^-64
+
+    # Pass 1: count edges per graph using deterministic xorshift64* stream
+    state = seed if seed != np.uint64(0) else np.uint64(0x9E3779B97F4A7C15)
+    total_edges = 0
+    for g in range(n_graphs):
+        start = int(node_offsets[g])
+        end = int(node_offsets[g + 1])
+        if directed:
+            for u in range(start, end):
+                for v in range(start, end):
+                    if not allow_self_loops and u == v:
+                        continue
+                    state ^= state >> np.uint64(12)
+                    state ^= state << np.uint64(25)
+                    state ^= state >> np.uint64(27)
+                    rnd = state * np.uint64(2685821657736338717)
+                    if float(rnd) * inv_u64 < p:
+                        state ^= state >> np.uint64(12)
+                        state ^= state << np.uint64(25)
+                        state ^= state >> np.uint64(27)
+                        total_edges += 1
+        else:
+            for u in range(start, end):
+                v_start = u if allow_self_loops else u + 1
+                for v in range(v_start, end):
+                    state ^= state >> np.uint64(12)
+                    state ^= state << np.uint64(25)
+                    state ^= state >> np.uint64(27)
+                    rnd = state * np.uint64(2685821657736338717)
+                    if float(rnd) * inv_u64 < p:
+                        state ^= state >> np.uint64(12)
+                        state ^= state << np.uint64(25)
+                        state ^= state >> np.uint64(27)
+                        total_edges += 1 if u == v else 2
+        edge_offsets[g + 1] = np.uint32(total_edges)
+
+    sources = np.empty(total_edges, dtype=np.uint32)
+    targets = np.empty(total_edges, dtype=np.uint32)
+    types = np.empty(total_edges, dtype=np.uint32)
+
+    if total_edges == 0:
+        return sources, targets, types, edge_offsets
+
+    # Pass 2: replay identical PRNG stream to populate edges without intermediate buffers
+    state = seed if seed != np.uint64(0) else np.uint64(0x9E3779B97F4A7C15)
+    cursor = 0
+    n_et = np.uint64(n_edge_types)
+    for g in range(n_graphs):
+        start = int(node_offsets[g])
+        end = int(node_offsets[g + 1])
+        if directed:
+            for u in range(start, end):
+                for v in range(start, end):
+                    if not allow_self_loops and u == v:
+                        continue
+                    state ^= state >> np.uint64(12)
+                    state ^= state << np.uint64(25)
+                    state ^= state >> np.uint64(27)
+                    rnd = state * np.uint64(2685821657736338717)
+                    if float(rnd) * inv_u64 < p:
+                        state ^= state >> np.uint64(12)
+                        state ^= state << np.uint64(25)
+                        state ^= state >> np.uint64(27)
+                        et = np.uint32(((state * np.uint64(2685821657736338717)) % n_et) + np.uint64(1))
+                        sources[cursor] = np.uint32(u)
+                        targets[cursor] = np.uint32(v)
+                        types[cursor] = et
+                        cursor += 1
+        else:
+            for u in range(start, end):
+                v_start = u if allow_self_loops else u + 1
+                for v in range(v_start, end):
+                    state ^= state >> np.uint64(12)
+                    state ^= state << np.uint64(25)
+                    state ^= state >> np.uint64(27)
+                    rnd = state * np.uint64(2685821657736338717)
+                    if float(rnd) * inv_u64 < p:
+                        state ^= state >> np.uint64(12)
+                        state ^= state << np.uint64(25)
+                        state ^= state >> np.uint64(27)
+                        et = np.uint32(((state * np.uint64(2685821657736338717)) % n_et) + np.uint64(1))
+                        sources[cursor] = np.uint32(u)
+                        targets[cursor] = np.uint32(v)
+                        types[cursor] = et
+                        cursor += 1
+                        if u != v:
+                            sources[cursor] = np.uint32(v)
+                            targets[cursor] = np.uint32(u)
+                            types[cursor] = et
+                            cursor += 1
+
+    return sources, targets, types, edge_offsets

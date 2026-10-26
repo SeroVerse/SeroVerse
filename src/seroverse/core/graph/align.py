@@ -6,10 +6,84 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
-from scipy.sparse import csr_array, diags
+from numba import njit
 
-from seroverse.core.graph.models import GraphModel
+from seroverse.core.graph.csr import CSR
+from seroverse.core.graph.models import Graph
+
+
+# Numba Hungarian / Jonker-Volgenant Assignment Kernel -----------------------------------------------------------------
+@njit(cache=True, nogil=True)
+def _linear_sum_assignment_kernel(
+    cost_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve rectangular minimum-weight bipartite assignment via shortest augmenting paths in O(n * m^2)."""
+    nr, nc = cost_matrix.shape
+    if nr == 0 or nc == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+
+    transposed = nr > nc
+    w = np.ascontiguousarray(cost_matrix.T if transposed else cost_matrix).astype(np.float64)
+    n, m = w.shape
+
+    u = np.zeros(n + 1, dtype=np.float64)
+    v = np.zeros(m + 1, dtype=np.float64)
+    p = np.zeros(m + 1, dtype=np.int64)
+    way = np.zeros(m + 1, dtype=np.int64)
+
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = np.full(m + 1, np.inf, dtype=np.float64)
+        used = np.zeros(m + 1, dtype=np.uint8)
+
+        while True:
+            used[j0] = 1
+            i0 = p[j0]
+            delta = np.inf
+            j1 = 0
+            for j in range(1, m + 1):
+                if used[j] == 0:
+                    cur = w[i0 - 1, j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(m + 1):
+                if used[j] != 0:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0 or j0 == 0:
+                break
+
+        while j0 != 0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+
+    if not transposed:
+        row_ind = np.arange(n, dtype=np.int64)
+        col_ind = np.empty(n, dtype=np.int64)
+        for j in range(1, m + 1):
+            if p[j] > 0:
+                col_ind[p[j] - 1] = j - 1
+        return row_ind, col_ind
+
+    row_ind = np.empty(n, dtype=np.int64)
+    col_ind = np.empty(n, dtype=np.int64)
+    idx = 0
+    for j in range(1, m + 1):
+        if p[j] > 0:
+            row_ind[idx] = j - 1
+            col_ind[idx] = p[j] - 1
+            idx += 1
+    order = np.argsort(row_ind[:idx])
+    return row_ind[:idx][order], col_ind[:idx][order]
 
 
 # Configuration Dataclass ----------------------------------------------------------------------------------------------
@@ -46,7 +120,7 @@ class EmbeddingStrategy(ABC):
     @abstractmethod
     def compute(
         self,
-        adj: csr_array,
+        adj: CSR,
         features: np.ndarray[tuple[int, int], np.dtype[np.float64]],
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Compute node embeddings from sparse adjacency and initial node features."""
@@ -62,7 +136,7 @@ class WeisfeilerLehmanEmbedding(EmbeddingStrategy):
 
     def compute(
         self,
-        adj: csr_array,
+        adj: CSR,
         features: np.ndarray[tuple[int, int], np.dtype[np.float64]],
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Smooth continuous features across sparse graph adjacency."""
@@ -72,14 +146,13 @@ class WeisfeilerLehmanEmbedding(EmbeddingStrategy):
 
         deg = np.asarray(adj.sum(axis=1), dtype=np.float64).ravel()
         deg[deg == 0] = 1.0
-        deg_inv = diags(1.0 / deg)
-        adj_norm = deg_inv @ adj
+        inv_deg = (1.0 / deg)[:, None]
 
         embeddings = [features]
         current_h = features
         alpha = self.smoothing_factor
         for _ in range(self.iterations):
-            current_h = (1.0 - alpha) * current_h + alpha * (adj_norm @ current_h)
+            current_h = (1.0 - alpha) * current_h + alpha * ((adj @ current_h) * inv_deg)
             embeddings.append(current_h)
 
         return np.concatenate(embeddings, axis=1)
@@ -91,7 +164,7 @@ class DegreeProfileEmbedding(EmbeddingStrategy):
 
     def compute(
         self,
-        adj: csr_array,
+        adj: CSR,
         features: np.ndarray[tuple[int, int], np.dtype[np.float64]],
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Augment node features with in-degree and out-degree computed from sparse adjacency."""
@@ -113,8 +186,8 @@ class CostStrategy(ABC):
         labels_a: np.ndarray[tuple[int], np.dtype[Any]],
         labels_b: np.ndarray[tuple[int], np.dtype[Any]],
         penalty: float = 1e6,
-        graph_a: GraphModel | None = None,
-        graph_b: GraphModel | None = None,
+        graph_a: Graph | None = None,
+        graph_b: Graph | None = None,
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Compute `(N, M)` pairwise node compatibility cost matrix."""
         ...
@@ -129,8 +202,8 @@ class ExactMatchCostStrategy(CostStrategy):
         labels_a: np.ndarray[tuple[int], np.dtype[Any]],
         labels_b: np.ndarray[tuple[int], np.dtype[Any]],
         penalty: float = 1e6,
-        graph_a: GraphModel | None = None,
-        graph_b: GraphModel | None = None,
+        graph_a: Graph | None = None,
+        graph_b: Graph | None = None,
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Compute exact equality cost matrix using vectorized broadcasting."""
         if len(labels_a) == 0 or len(labels_b) == 0:
@@ -149,8 +222,8 @@ class CallableCostStrategy(CostStrategy):
         labels_a: np.ndarray[tuple[int], np.dtype[Any]],
         labels_b: np.ndarray[tuple[int], np.dtype[Any]],
         penalty: float = 1e6,
-        graph_a: GraphModel | None = None,
-        graph_b: GraphModel | None = None,
+        graph_a: Graph | None = None,
+        graph_b: Graph | None = None,
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float64]]:
         """Delegate cost computation to wrapped callable."""
         return np.asarray(self.fn(labels_a, labels_b), dtype=np.float64)
@@ -164,8 +237,8 @@ class Alignment:
     matches: dict[int, int]
     costs: dict[int, float]
     total_cost: float
-    graph_a: GraphModel
-    graph_b: GraphModel
+    graph_a: Graph
+    graph_b: Graph
     unmatched_a: tuple[int, ...]
     unmatched_b: tuple[int, ...]
 
@@ -179,7 +252,7 @@ class GraphAligner:
     embedding_strategy: EmbeddingStrategy = WeisfeilerLehmanEmbedding()
     config: AlignmentConfig = AlignmentConfig.default()
 
-    def align(self, graph_a: GraphModel, graph_b: GraphModel) -> Alignment:
+    def align(self, graph_a: Graph, graph_b: Graph) -> Alignment:
         """Execute bipartite graph alignment between two `GraphModel` instances."""
         is_sym = self.config.symmetrize_embedding
         adj_a, labels_a = graph_a.as_graph(as_bipartite=self.config.as_bipartite, symmetrize=is_sym)
@@ -216,7 +289,7 @@ class GraphAligner:
         c_total = c_base + c_topo
         c_safe = np.where(np.isinf(c_total), self.config.penalty_unmatched, c_total)
 
-        row_ind, col_ind = linear_sum_assignment(c_safe)
+        row_ind, col_ind = _linear_sum_assignment_kernel(c_safe)
 
         matches: dict[int, int] = {}
         costs: dict[int, float] = {}

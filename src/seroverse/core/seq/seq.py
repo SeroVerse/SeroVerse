@@ -66,7 +66,7 @@ class Sequence:
         Returns:
             bytes: FASTA formatted byte representation of the record.
         """
-        return b">%b\n%b\n" % (self.id, self.seq)
+        return b">%s\n%s\n" % (self.id, self.seq)
 
     def translate(
         self,
@@ -131,11 +131,11 @@ class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
         mv = self.seqs.data
         if use_indices:
             return b"".join(
-                b">%d\n%b\n" % (i, bytes(mv[o : o + length_val]))
+                b">%d\n%s\n" % (i, bytes(mv[o : o + length_val]))
                 for i, (o, length_val) in enumerate(zip(self.offsets, self.lengths, strict=False))
             )
         return b"".join(
-            b">%b\n%b\n" % (name, bytes(mv[o : o + length_val]))
+            b">%s\n%s\n" % (name, bytes(mv[o : o + length_val]))
             for name, o, length_val in zip(self.ids, self.offsets, self.lengths, strict=False)
         )
 
@@ -422,7 +422,7 @@ class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
         if new_ids is None:
             new_ids_arr = np.array(
                 [
-                    b"%b_%i_%i_%i" % (self.ids[i], x, y, z)
+                    b"%s_%d_%d_%d" % (self.ids[i], x, y, z)
                     for i, x, y, z in zip(indices, starts, ends, strands, strict=False)
                 ],
                 dtype="S",
@@ -495,98 +495,49 @@ class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
         )
         return Sequences(self.ids, out_seqs, offsets, lengths)
 
-
-class BacterialTranslationTable:
-    r"""NCBI Translation Table 11 utilities for bacterial codon translation and complementation.
-
-    Compatibility wrapper delegating to [`GeneticCode`][seroverse.core.seq.alphabet.GeneticCode] (`GeneticCode.bacterial`).
-    """
-
-    _MAPPING = _BACTERIAL_MAPPING = {
-        b"TTT": b"F",
-        b"TTC": b"F",
-        b"TTA": b"L",
-        b"TTG": b"L",
-        b"TCT": b"S",
-        b"TCC": b"S",
-        b"TCA": b"S",
-        b"TCG": b"S",
-        b"TAT": b"Y",
-        b"TAC": b"Y",
-        b"TAA": b"*",
-        b"TAG": b"*",
-        b"TGT": b"C",
-        b"TGC": b"C",
-        b"TGA": b"*",
-        b"TGG": b"W",
-        b"CTT": b"L",
-        b"CTC": b"L",
-        b"CTA": b"L",
-        b"CTG": b"L",
-        b"CCT": b"P",
-        b"CCC": b"P",
-        b"CCA": b"P",
-        b"CCG": b"P",
-        b"CAT": b"H",
-        b"CAC": b"H",
-        b"CAA": b"Q",
-        b"CAG": b"Q",
-        b"CGT": b"R",
-        b"CGC": b"R",
-        b"CGA": b"R",
-        b"CGG": b"R",
-        b"ATT": b"I",
-        b"ATC": b"I",
-        b"ATA": b"I",
-        b"ATG": b"M",
-        b"ACT": b"T",
-        b"ACC": b"T",
-        b"ACA": b"T",
-        b"ACG": b"T",
-        b"AAT": b"N",
-        b"AAC": b"N",
-        b"AAA": b"K",
-        b"AAG": b"K",
-        b"AGT": b"S",
-        b"AGC": b"S",
-        b"AGA": b"R",
-        b"AGG": b"R",
-        b"GTT": b"V",
-        b"GTC": b"V",
-        b"GTA": b"V",
-        b"GTG": b"V",
-        b"GCT": b"A",
-        b"GCC": b"A",
-        b"GCA": b"A",
-        b"GCG": b"A",
-        b"GAT": b"D",
-        b"GAC": b"D",
-        b"GAA": b"E",
-        b"GAG": b"E",
-        b"GGT": b"G",
-        b"GGC": b"G",
-        b"GGA": b"G",
-        b"GGG": b"G",
-    }
-    _START_CODONS = GeneticCode.bacterial.start_codons
-    _STOP_CODONS = GeneticCode.bacterial.stop_codons
-    _CHAR_MAP = GeneticCode.bacterial._char_map
-    _CODON_MAP = GeneticCode.bacterial._codon_map
-    _COMP_MAP = (
-        Alphabet.DNA.complement_lut if Alphabet.DNA.complement_lut is not None else np.arange(256, dtype=np.uint8)
-    )
-
     @classmethod
-    def translate(
-        cls, seq: bytes | bytearray | memoryview | np.ndarray[tuple[int], np.dtype[np.uint8]], to_stop: bool = False
-    ) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
-        r"""Translate a nucleotide sequence array or byte string to amino acid byte values."""
-        return GeneticCode.bacterial.translate(seq, to_stop=to_stop)
+    def random(
+        cls,
+        alphabet: Alphabet = Alphabet.DNA,
+        n_seqs: int = 10,
+        length: int | tuple[int, int] = (50, 250),
+        rng: np.random.Generator | int | None = None,
+    ) -> Self:
+        r"""Generate a batch of random sequences sampled uniformly from an [`Alphabet`][seroverse.core.seq.alphabet.Alphabet].
 
-    @classmethod
-    def is_coding(cls, seq: bytes) -> bool:
-        r"""Check if a byte sequence starts with a valid bacterial start codon and ends with a stop codon."""
-        return GeneticCode.bacterial.is_coding(seq)
+        Args:
+            alphabet (Alphabet): Alphabet whose primary symbols are sampled uniformly. Defaults to `Alphabet.DNA`.
+            n_seqs (int): Number of sequences to generate (`n_seqs >= 0`). Defaults to `10`.
+            length (int | tuple[int, int]): Either a fixed integer sequence length or an inclusive
+                `(min_len, max_len)` 2-tuple sampled uniformly per sequence. Defaults to `(50, 250)`.
+            rng (np.random.Generator | int | None): Optional random generator, integer seed, or `None`
+                passed to `np.random.default_rng`.
+
+        Returns:
+            Self: A newly generated [`Sequences`][seroverse.core.seq.seq.Sequences] container.
+        """
+        if n_seqs < 0:
+            raise ValueError(f"n_seqs must be >= 0; got {n_seqs}.")
+        if n_seqs == 0:
+            return cls.empty()
+
+        gen = np.random.default_rng(rng)
+        if isinstance(length, (int, np.integer)):
+            if int(length) < 0:
+                raise ValueError(f"length must be >= 0; got {length}.")
+            lengths = np.full(n_seqs, int(length), dtype=np.int32)
+        else:
+            min_len, max_len = int(length[0]), int(length[1])
+            if min_len < 0 or max_len < min_len:
+                raise ValueError(f"Invalid length range ({min_len}, {max_len}); require 0 <= min_len <= max_len.")
+            lengths = gen.integers(min_len, max_len + 1, size=n_seqs, dtype=np.int32)
+
+        offsets = cls.lengths_to_offsets(lengths)
+        total_len = int(offsets[-1] + lengths[-1])
+        sym_bytes = np.frombuffer(alphabet.symbols, dtype=np.uint8)
+        seqs = sym_bytes[gen.integers(0, len(sym_bytes), size=total_len)]
+        ids = np.array([b"%d" % i for i in range(n_seqs)], dtype="S")
+        return cls(ids, seqs, offsets, lengths)
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------

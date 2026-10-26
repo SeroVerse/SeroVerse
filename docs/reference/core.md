@@ -68,7 +68,9 @@ Core Structure-of-Arrays (SoA) protocols, genomic intervals, sequence & alphabet
 
 ---
 
-## Graph Models, Alignment & Layout (`seroverse.core.graph`)
+## Graph Models, CSR Matrices, Alignment & Layout (`seroverse.core.graph`)
+
+::: seroverse.core.graph.csr
 
 ::: seroverse.core.graph.models
 

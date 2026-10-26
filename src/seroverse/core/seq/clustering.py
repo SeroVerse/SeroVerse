@@ -13,10 +13,9 @@ from typing import Any, Literal, Self, overload
 
 import numpy as np
 from numba import njit, prange
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.sparse import csgraph, csr_array
 
 from seroverse.core.collections import RaggedArrayContainer
+from seroverse.core.graph.csr import CSR
 from seroverse.core.seq.alphabet import Alphabet
 from seroverse.core.seq.kmers import RandstrobeIndex
 from seroverse.core.seq.pairwise import PairwiseAligner, _blosum62_matrix
@@ -101,7 +100,7 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
         out[self.members] = np.repeat(np.arange(len(self.lengths), dtype=np.int32), self.lengths)
         return out
 
-    def as_csr(self, n_seqs: int | None = None) -> csr_array:
+    def as_csr(self, n_seqs: int | None = None) -> CSR:
         r"""Return a zero-copy $(C \times N)$ sparse CSR cluster-membership incidence matrix.
 
         Row $c$ contains `1` at column $i$ for each sequence $i \in \text{members}_c$.
@@ -110,15 +109,15 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
             n_seqs: Total number of sequences $N$ (columns). If `None`, inferred from `max(members) + 1`.
 
         Returns:
-            csr_array: Sparse $(C \times N)$ `uint8` membership matrix.
+            CSR: Sparse $(C \times N)$ `uint8` membership matrix.
         """
         c = len(self)
         if c == 0 or len(self.members) == 0:
             cols = n_seqs if n_seqs is not None else 0
-            return csr_array((c, cols), dtype=np.uint8)
+            return CSR.empty((c, cols), dtype=np.uint8)
         cols = n_seqs if n_seqs is not None else int(self.members.max()) + 1
         data = np.ones(len(self.members), dtype=np.uint8)
-        return csr_array((data, self.members, self.indptr), shape=(c, cols), copy=False)
+        return CSR(indptr=self.indptr, indices=self.members, data=data, shape=(c, cols))
 
     @overload
     def __getitem__(self, item: int | np.integer[Any]) -> Cluster: ...
@@ -263,7 +262,7 @@ class Clusterer:
 
     Combines sparse syncmer-linked randstrobe pre-filtering ([`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex]),
     SIMD-parallel banded Smith-Waterman-Gotoh alignment ([`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner]),
-    and compiled Numba/SciPy clustering algorithms to group biological sequences.
+    and compiled Numba clustering algorithms to group biological sequences.
 
     Modes:
         - `"cdhit"` (default): Length-descending greedy incremental clustering (CD-HIT style).
@@ -272,7 +271,7 @@ class Clusterer:
           divergent functional homologs (e.g., glycosyltransferases, polymerases, flippases) via
           random-walk expansion and inflation ($I$).
         - `"greedy_cover"`: Iterative maximum-uncovered-degree greedy set cover.
-        - `"upgma"`: Hierarchical average-linkage (UPGMA) clustering via SciPy.
+        - `"upgma"`: Hierarchical average-linkage (UPGMA) clustering.
         - `"connected_components"`: Transitive closure core components.
 
     Args:
@@ -1006,6 +1005,77 @@ def _greedy_cover_cluster(
     return cluster_ids, reps_arr, sizes_arr
 
 
+@njit(nogil=True, cache=True)
+def _upgma_component_kernel(
+    m: int,
+    loc_u: np.ndarray,
+    loc_v: np.ndarray,
+    dists: np.ndarray,
+    cutoff: float,
+) -> np.ndarray:
+    r"""Compiled UPGMA average-linkage clustering on a local component of size `m` up to `cutoff`."""
+    d_mat = np.ones((m, m), dtype=np.float64)
+    for i in range(m):
+        d_mat[i, i] = 0.0
+    for e in range(len(loc_u)):
+        u = int(loc_u[e])
+        v = int(loc_v[e])
+        w = float(dists[e])
+        if w < d_mat[u, v]:
+            d_mat[u, v] = w
+            d_mat[v, u] = w
+
+    active = np.ones(m, dtype=np.uint8)
+    sizes = np.ones(m, dtype=np.float64)
+    parent = np.arange(m, dtype=np.int32)
+
+    while True:
+        best_d = cutoff + 1.0
+        best_i = -1
+        best_j = -1
+        for i in range(m):
+            if active[i] == 0:
+                continue
+            for j in range(i + 1, m):
+                if active[j] == 0:
+                    continue
+                val = d_mat[i, j]
+                if val <= cutoff and val < best_d:
+                    best_d = val
+                    best_i = i
+                    best_j = j
+        if best_i < 0:
+            break
+
+        si = sizes[best_i]
+        sj = sizes[best_j]
+        s_new = si + sj
+        for k in range(m):
+            if active[k] == 0 or k == best_i or k == best_j:
+                continue
+            new_d = (si * d_mat[best_i, k] + sj * d_mat[best_j, k]) / s_new
+            d_mat[best_i, k] = new_d
+            d_mat[k, best_i] = new_d
+        sizes[best_i] = s_new
+        active[best_j] = 0
+        parent[best_j] = best_i
+
+    labels = np.empty(m, dtype=np.int32)
+    root_to_cid = np.full(m, -1, dtype=np.int32)
+    next_cid = 0
+    for i in range(m):
+        r = i
+        while parent[r] != r:
+            r = int(parent[r])
+        cid = int(root_to_cid[r])
+        if cid < 0:
+            cid = next_cid
+            root_to_cid[r] = cid
+            next_cid += 1
+        labels[i] = cid
+    return labels
+
+
 def _upgma_cluster(
     n_seqs: int,
     lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
@@ -1014,33 +1084,58 @@ def _upgma_cluster(
     pidents: np.ndarray[Any, np.dtype[np.floating[Any]]],
     min_identity: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    r"""Hierarchical average-linkage (UPGMA) clustering via SciPy."""
+    r"""Hierarchical average-linkage (UPGMA) clustering via compiled Numba kernels."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
 
-    total_pairs = n_seqs * (n_seqs - 1) // 2
-    condensed_d = np.ones(total_pairs, dtype=np.float64)
+    if len(q_indices) == 0:
+        return np.arange(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.ones(n_seqs, dtype=np.int32)
 
-    if len(q_indices) > 0:
-        q = q_indices.astype(np.int64)
-        t = t_indices.astype(np.int64)
-        swap = q > t
-        if np.any(swap):
-            q_copy = q.copy()
-            q[swap] = t[swap]
-            t[swap] = q_copy[swap]
-
-        indices = n_seqs * q - (q * (q + 1)) // 2 + t - q - 1
-        dists = np.clip(1.0 - (pidents / 100.0), 0.0, 1.0)
-        condensed_d[indices] = dists
-
-    z = linkage(condensed_d, method="average")
     cutoff = max(1e-6, 1.0 - (min_identity / 100.0))
-    raw_clusters = fcluster(z, t=cutoff, criterion="distance")
+    dists = np.clip(1.0 - (pidents.astype(np.float64) / 100.0), 0.0, 1.0)
 
-    unique_c, inv = np.unique(raw_clusters, return_inverse=True)
-    cluster_ids = inv.astype(np.int32)
-    n_clusters = len(unique_c)
+    if cutoff >= 1.0:
+        raw_labels = _upgma_component_kernel(
+            n_seqs,
+            q_indices.astype(np.int32, copy=False),
+            t_indices.astype(np.int32, copy=False),
+            dists,
+            cutoff,
+        )
+        n_clusters = int(raw_labels.max()) + 1
+        cluster_ids = raw_labels
+    else:
+        n_comp, comp_labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
+        edge_comp = comp_labels[q_indices]
+        edge_order = np.argsort(edge_comp, kind="mergesort")
+        sorted_ec = edge_comp[edge_order]
+        ec_starts = np.searchsorted(sorted_ec, np.arange(n_comp), side="left")
+        ec_ends = np.searchsorted(sorted_ec, np.arange(n_comp), side="right")
+
+        comp_node_order = np.argsort(comp_labels, kind="mergesort")
+        sorted_nc = comp_labels[comp_node_order]
+        nc_starts = np.searchsorted(sorted_nc, np.arange(n_comp), side="left")
+        nc_ends = np.searchsorted(sorted_nc, np.arange(n_comp), side="right")
+
+        cluster_ids = np.empty(n_seqs, dtype=np.int32)
+        global_local_map = np.empty(n_seqs, dtype=np.int32)
+        n_clusters = 0
+
+        for c in range(n_comp):
+            nodes_c = comp_node_order[nc_starts[c] : nc_ends[c]]
+            m = len(nodes_c)
+            if m == 1:
+                cluster_ids[nodes_c[0]] = n_clusters
+                n_clusters += 1
+                continue
+            global_local_map[nodes_c] = np.arange(m, dtype=np.int32)
+            e_slice = edge_order[ec_starts[c] : ec_ends[c]]
+            loc_u = global_local_map[q_indices[e_slice]].astype(np.int32, copy=False)
+            loc_v = global_local_map[t_indices[e_slice]].astype(np.int32, copy=False)
+            sub_labels = _upgma_component_kernel(m, loc_u, loc_v, dists[e_slice], cutoff)
+            n_sub = int(sub_labels.max()) + 1
+            cluster_ids[nodes_c] = sub_labels + n_clusters
+            n_clusters += n_sub
 
     reps = np.empty(n_clusters, dtype=np.int32)
     sizes = np.bincount(cluster_ids, minlength=n_clusters).astype(np.int32)
@@ -1062,18 +1157,16 @@ def _connected_components_cluster(
     q_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
     t_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    r"""Transitive closure connected components clustering via SciPy."""
+    r"""Transitive closure connected components clustering via compiled Union-Find."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
 
     if len(q_indices) == 0:
         return np.arange(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.ones(n_seqs, dtype=np.int32)
 
-    data = np.ones(len(q_indices), dtype=np.int8)
-    adj = csr_array((data, (q_indices, t_indices)), shape=(n_seqs, n_seqs))
-    n_components, labels = csgraph.connected_components(adj, directed=False)
+    n_components, labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
 
-    cluster_ids = labels.astype(np.int32)
+    cluster_ids = labels.astype(np.int32, copy=False)
     sizes = np.bincount(cluster_ids, minlength=n_components).astype(np.int32)
 
     order = np.argsort(-lengths)
@@ -1110,9 +1203,7 @@ def _mcl_cluster(
     norm_weights = np.maximum(bitscores.astype(np.float64) / max_lens, 1e-4)
 
     # Decompose graph into connected components so MCL runs on compact local subgraphs
-    ones_data = np.ones(len(q_indices), dtype=np.int8)
-    comp_adj = csr_array((ones_data, (q_indices, t_indices)), shape=(n_seqs, n_seqs))
-    n_comp, comp_labels = csgraph.connected_components(comp_adj, directed=False)
+    n_comp, comp_labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
 
     # Pre-group edges by connected component
     edge_comp = comp_labels[q_indices]
@@ -1184,8 +1275,8 @@ def _mcl_cluster(
 
         attr = (mat > 1e-3).astype(np.int32)
         shared_attr = (attr.T @ attr) > 0
-        sub_adj = csr_array(shared_attr | (mat > 1e-3) | (mat.T > 1e-3))
-        n_sub, sub_labels = csgraph.connected_components(sub_adj, directed=False)
+        sub_u, sub_v = np.nonzero(np.triu(shared_attr | (mat > 1e-3) | (mat.T > 1e-3), k=1))
+        n_sub, sub_labels = CSR.connected_components_from_edges(m, sub_u.astype(np.int32), sub_v.astype(np.int32))
 
         for s_id in range(n_sub):
             sub_local = np.where(sub_labels == s_id)[0]

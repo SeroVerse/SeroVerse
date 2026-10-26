@@ -52,7 +52,7 @@ class GenomeAssembly(Sequences):
     def from_fasta(
         cls,
         data: bytes | bytearray | memoryview,
-        id_: bytes | str = b"unknown",
+        id_: bytes = b"unknown",
         *,
         truncate_id: bool = True,
         uppercase: bool = True,
@@ -61,7 +61,7 @@ class GenomeAssembly(Sequences):
 
         Args:
             data (bytes | bytearray | memoryview): Raw binary FASTA contents.
-            id_ (bytes | str): Genome assembly identifier.
+            id_ (bytes): Genome assembly identifier.
             truncate_id (bool): If `True`, truncates header IDs at first whitespace.
             uppercase (bool): If `True`, normalizes sequence bytes to uppercase ASCII.
 
@@ -69,8 +69,7 @@ class GenomeAssembly(Sequences):
             GenomeAssembly: Constructed [`GenomeAssembly`][seroverse.core.genome.GenomeAssembly] instance.
         """
         seqs = FastaReader.from_bytes(data, truncate_id=truncate_id, uppercase=uppercase).load()
-        id_bytes = id_.encode("utf-8") if isinstance(id_, str) else bytes(id_)
-        return cls(seqs.ids, seqs.seqs, seqs.offsets, seqs.lengths, id=id_bytes)
+        return cls(seqs.ids, seqs.seqs, seqs.offsets, seqs.lengths, id=bytes(id_))
 
     @classmethod
     def from_file(cls, filepath: str | Path) -> Self:
@@ -97,22 +96,20 @@ class GenomeAssembly(Sequences):
             return cls.from_stream(handle, id_=stem)
 
     @classmethod
-    def from_stream(cls, handle: IO[bytes], id_: bytes | str | None = None) -> Self:
+    def from_stream(cls, handle: IO[bytes], id_: bytes | None = None) -> Self:
         r"""Load a genome assembly from an open binary stream.
 
         Args:
             handle (IO[bytes]): Open binary FASTA stream handle.
-            id_ (bytes | str | None): Custom assembly identifier. If None, derived from
+            id_ (bytes | None): Custom assembly identifier. If None, derived from
                 handle name or defaults to `b'unknown'`.
 
         Returns:
             GenomeAssembly: Loaded [`GenomeAssembly`][seroverse.core.genome.GenomeAssembly] instance.
         """
         if id_ is None:
-            raw_name = getattr(handle, "name", "unknown")
+            raw_name = getattr(handle, "name", b"unknown")
             id_bytes = raw_name.encode("utf-8") if isinstance(raw_name, str) else bytes(raw_name)
-        elif isinstance(id_, str):
-            id_bytes = id_.encode("utf-8")
         else:
             id_bytes = bytes(id_)
 
@@ -123,17 +120,16 @@ class GenomeAssembly(Sequences):
     def from_records(
         cls,
         records: list[Sequence] | tuple[Sequence, ...] | Iterable[Sequence],
-        id_: bytes | str = b"unknown",
+        id_: bytes = b"unknown",
     ) -> Self:
         r"""Construct a [`GenomeAssembly`][seroverse.core.genome.GenomeAssembly] from sequence records.
 
         Args:
             records (Iterable[Sequence]): Iterable of [`Sequence`][seroverse.core.seq.seq.Sequence] objects.
-            id_ (bytes | str): Genome assembly identifier.
+            id_ (bytes): Genome assembly identifier.
 
         Returns:
             GenomeAssembly: Constructed [`GenomeAssembly`][seroverse.core.genome.GenomeAssembly] instance.
         """
         seqs = Sequences.from_records(records)
-        id_bytes = id_.encode("utf-8") if isinstance(id_, str) else bytes(id_)
-        return cls(seqs.ids, seqs.seqs, seqs.offsets, seqs.lengths, id=id_bytes)
+        return cls(seqs.ids, seqs.seqs, seqs.offsets, seqs.lengths, id=bytes(id_))

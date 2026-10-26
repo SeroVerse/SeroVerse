@@ -33,22 +33,27 @@ class Strand(IntEnum):
 
     @classmethod
     def _missing_(cls, value: object) -> Strand:
-        r"""Coerce strings, bytes, or integers to a valid [`Strand`][seroverse.core.interval.Strand] instance.
+        r"""Coerce bytes or integers to a valid [`Strand`][seroverse.core.interval.Strand] instance.
 
         Args:
-            value (object): Value to coerce (e.g. `'+'`, `'-'`, `b'+'`, `1`, `-1`).
+            value (object): Value to coerce (e.g. `b'+'`, `b'-'`, `b'1'`, `b'-1'`, `1`, `-1`).
 
         Returns:
             Strand: Corresponding [`Strand`][seroverse.core.interval.Strand] enum member.
         """
-        if isinstance(value, bytes):
-            value = value.decode("ascii")
-        if isinstance(value, str):
-            if value in ("+", "1", "+1"):
-                return Strand.FORWARD
-            elif value in ("-", "-1"):
-                return Strand.REVERSE
+        if value in (b"+", b"1", b"+1", "+", "1", "+1"):
+            return Strand.FORWARD
+        if value in (b"-", b"-1", "-", "-1"):
+            return Strand.REVERSE
         return Strand.UNSTRANDED
+
+    def __bytes__(self) -> bytes:
+        r"""Return the single-byte ASCII representation of the strand (`b'+'`, `b'-'`, or `b'.'`)."""
+        if self == Strand.FORWARD:
+            return b"+"
+        if self == Strand.REVERSE:
+            return b"-"
+        return b"."
 
     def __str__(self) -> str:
         r"""Return the string representation of the strand (`'+'`, `'-'`, or `'.'`).

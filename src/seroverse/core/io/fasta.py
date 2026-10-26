@@ -113,7 +113,7 @@ class FastaReader(Iterator[Sequence]):
             chunk = self._handle.read(self._chunk_size)
             if not chunk:
                 break
-            buf += chunk
+            buf = b"%s%s" % (buf, chunk) if buf else chunk
 
             if not started:
                 if buf[0] == 62:  # ord('>')

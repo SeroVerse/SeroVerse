@@ -1,13 +1,11 @@
 """Unified asynchronous HTTP client and msgspec serialization helpers for SeroVerse."""
 
-from __future__ import annotations
-
 import asyncio
+import hashlib
 import os
 import time
 from collections.abc import AsyncIterator, Coroutine
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from io import BytesIO
 from pathlib import Path
 from types import TracebackType
@@ -16,35 +14,7 @@ from typing import Any, Self
 import aiohttp
 import msgspec
 
-
-def encode_msgpack(obj: Any) -> bytes:
-    """Serialize an object or dataclass tree into compact MessagePack bytes."""
-    return msgspec.msgpack.encode(obj)
-
-
-def decode_msgpack[T](data: bytes, type_: type[T]) -> T:
-    """Deserialize MessagePack bytes directly into a typed `@dataclass(frozen=True, slots=True)` structure."""
-    return msgspec.msgpack.decode(data, type=type_)
-
-
-def save_msgpack(path: Path, obj: Any) -> None:
-    """Atomically persist `obj` to `path` as binary MessagePack."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_bytes(msgspec.msgpack.encode(obj))
-    os.replace(tmp, path)
-
-
-def load_msgpack[T](path: Path, type_: type[T]) -> T:
-    """Load and decode a binary MessagePack file into `type_`."""
-    return msgspec.msgpack.decode(path.read_bytes(), type=type_)
-
-
-def cassette_context(recorder: Any | None, cassette_name: str) -> Any:
-    """Return `recorder.use_cassette(cassette_name)` if `recorder` supports it, else `nullcontext()`."""
-    if recorder is not None and hasattr(recorder, "use_cassette"):
-        return recorder.use_cassette(cassette_name)
-    return nullcontext()
+from seroverse.progress import current_progress
 
 
 class Client:
@@ -90,9 +60,37 @@ class Client:
         """Return the configured API key string, or `None`."""
         return self._api_key
 
+    @staticmethod
+    def encode_msgpack(obj: Any) -> bytes:
+        """Serialize an object or dataclass tree into compact MessagePack bytes."""
+        return msgspec.msgpack.encode(obj)
+
+    @staticmethod
+    def decode_msgpack[T](data: bytes, type_: type[T]) -> T:
+        """Deserialize MessagePack bytes directly into a typed `@dataclass(frozen=True, slots=True)` structure."""
+        return msgspec.msgpack.decode(data, type=type_)
+
+    @staticmethod
+    def save_msgpack(path: Path, obj: Any) -> None:
+        """Atomically persist `obj` to `path` as binary MessagePack."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(msgspec.msgpack.encode(obj))
+        os.replace(tmp, path)
+
+    @staticmethod
+    def load_msgpack[T](path: Path, type_: type[T]) -> T:
+        """Load and decode a binary MessagePack file into `type_`."""
+        return msgspec.msgpack.decode(path.read_bytes(), type=type_)
+
     def __repr__(self) -> str:
         key_repr = "'**********'" if self._api_key else "None"
         return f"{self.__class__.__name__}(base_url='{self.base_url}', api_key={key_repr})"
+
+    def __cache_fingerprint__(self) -> tuple[str, str, str]:
+        """Returns a deterministic, credential-safe fingerprint tuple for content-addressable caches."""
+        key_digest = hashlib.sha256((self._api_key or "").encode("utf-8")).hexdigest()[:16] if self._api_key else ""
+        return (type(self).__qualname__, self.base_url, key_digest)
 
     def _headers(self) -> dict[str, str]:
         headers = {"User-Agent": self.user_agent, "Accept": "application/json"}
@@ -251,12 +249,21 @@ class Client:
         chunk_size: int = 65536,
         **kwargs: Any,
     ) -> AsyncIterator[bytes]:
-        """Stream response bytes in chunks as an async generator."""
+        """Stream response bytes in chunks as an async generator, emitting progress when `Content-Length` is known."""
         session = await self.get_session()
         url = self._url(endpoint)
+        prog = current_progress()
         async with session.request(method, url, **kwargs) as resp:
             resp.raise_for_status()
+            total_bytes = resp.content_length if resp.content_length and resp.content_length > 0 else None
+            received = 0
             async for chunk in resp.content.iter_chunked(chunk_size):
+                received += len(chunk)
+                if total_bytes is not None and prog.is_active:
+                    prog.report(
+                        min(1.0, received / total_bytes),
+                        detail=f"Streaming {endpoint} ({received:,} / {total_bytes:,} B)",
+                    )
                 yield chunk
 
     def run_sync[T](self, coro: Coroutine[Any, Any, T]) -> T:

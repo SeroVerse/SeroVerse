@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 from seroverse.client.base import Client
+from seroverse.progress import current_progress
 
 PATHOGENWATCH_API_URL = "https://pathogen.watch/api"
 
@@ -163,7 +165,32 @@ class PathogenwatchCollection:
         return grouped
 
 
-class PathogenwatchBaseClient(Client):
+@dataclass(frozen=True, slots=True)
+class PathogenwatchCollectionBundle:
+    """In-memory collection download bundle from Pathogenwatch.
+
+    Attributes:
+        uuid: Short UUID identifier of the collection.
+        name: Resolved collection name.
+        details: Raw collection details dictionary (`downloads`, `trees`, `organismName`).
+        records: Paginated genome records tuple.
+        analyses: Tuple of `(download_type, csv_bytes)` pairs in requested order.
+        metadata_csv: Downloaded isolate metadata CSV bytes, or `None`.
+        matrix_csv: Downloaded pairwise distance matrix CSV bytes, or `None`.
+        fallback_newick: First tree Newick byte string from `details['trees']` if available.
+    """
+
+    uuid: str
+    name: str
+    details: dict[str, Any]
+    records: tuple[dict[str, Any], ...]
+    analyses: tuple[tuple[str, bytes], ...]
+    metadata_csv: bytes | None = None
+    matrix_csv: bytes | None = None
+    fallback_newick: bytes = b""
+
+
+class PathogenwatchClient(Client):
     """Asynchronous and synchronous client for interacting with the Pathogenwatch REST API."""
 
     DEFAULT_BASE_URL: ClassVar[str] = PATHOGENWATCH_API_URL
@@ -227,6 +254,7 @@ class PathogenwatchBaseClient(Client):
         """Fetches genome analysis records for a collection."""
         all_records: list[dict[str, Any]] = []
         current_page = page
+        prog = current_progress()
 
         while True:
             params: dict[str, str] = {"uuid": uuid, "page": str(current_page)}
@@ -243,6 +271,11 @@ class PathogenwatchBaseClient(Client):
             if not all_pages or not res.get("hasMore") or not records:
                 break
 
+            if prog.is_active:
+                prog.report(
+                    min(0.95, 1.0 - 1.0 / (current_page + 1.0)),
+                    detail=f"Fetched page {current_page} ({len(all_records):,} genomes)...",
+                )
             current_page += 1
 
         return all_records
@@ -251,12 +284,9 @@ class PathogenwatchBaseClient(Client):
         self,
         uuid: str,
         matrix_type: str = "difference",
-    ) -> str:
-        """Downloads pairwise genomic distance matrix CSV for a collection."""
-        res = await self.get(f"downloads/matrix/{matrix_type}", params={"uuid": uuid})
-        if not isinstance(res, str):
-            raise ValueError(f"Expected CSV string response from matrix endpoint, got {type(res)}")
-        return res
+    ) -> bytes:
+        """Downloads pairwise genomic distance matrix CSV bytes for a collection."""
+        return await self.stream_bytes("GET", f"downloads/matrix/{matrix_type}", params={"uuid": uuid})
 
     async def download_analysis(
         self,
@@ -265,8 +295,8 @@ class PathogenwatchBaseClient(Client):
         job: str | None = None,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Downloads discrete analysis CSV results (e.g. Kleborate, Kaptive) for a collection."""
+    ) -> bytes:
+        """Downloads discrete analysis CSV bytes (e.g. Kleborate, Kaptive) for a collection."""
         if job is None:
             details = await self.get_collection(uuid)
             downloads = details.get("downloads", [])
@@ -291,22 +321,20 @@ class PathogenwatchBaseClient(Client):
         if prefix:
             params["prefix"] = prefix
 
-        res = await self.post(
+        return await self.stream_bytes(
+            "POST",
             f"downloads/{download_type.lower()}",
             params=params,
             json={"ids": ids_param},
         )
-        if not isinstance(res, str):
-            raise ValueError(f"Expected CSV string response from downloads/{download_type}, got {type(res)}")
-        return res
 
     async def download_kleborate(
         self,
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Downloads Kleborate analysis CSV for a collection."""
+    ) -> bytes:
+        """Downloads Kleborate analysis CSV bytes for a collection."""
         return await self.download_analysis(
             uuid=uuid,
             download_type="kleborate",
@@ -319,8 +347,8 @@ class PathogenwatchBaseClient(Client):
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Downloads Kaptive analysis CSV for a collection."""
+    ) -> bytes:
+        """Downloads Kaptive analysis CSV bytes for a collection."""
         return await self.download_analysis(
             uuid=uuid,
             download_type="kaptive",
@@ -333,8 +361,8 @@ class PathogenwatchBaseClient(Client):
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Downloads isolate metadata CSV for a collection."""
+    ) -> bytes:
+        """Downloads isolate metadata CSV bytes for a collection."""
         if genome_ids is None:
             records = await self.get_collection_genomes(uuid, all_pages=True)
             genome_ids = [str(r["id"]) for r in records if "id" in r]
@@ -346,22 +374,20 @@ class PathogenwatchBaseClient(Client):
         if prefix:
             params["prefix"] = prefix
 
-        res = await self.post(
+        return await self.stream_bytes(
+            "POST",
             "downloads/metadata",
             params=params or None,
             json={"ids": ids_param},
         )
-        if not isinstance(res, str):
-            raise ValueError(f"Expected CSV string response from downloads/metadata, got {type(res)}")
-        return res
 
     async def download_summary(
         self,
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Downloads summary CSV for a collection."""
+    ) -> bytes:
+        """Downloads summary CSV bytes for a collection."""
         if genome_ids is None:
             records = await self.get_collection_genomes(uuid, all_pages=True)
             genome_ids = [str(r["id"]) for r in records if "id" in r]
@@ -373,14 +399,177 @@ class PathogenwatchBaseClient(Client):
         if prefix:
             params["prefix"] = prefix
 
-        res = await self.post(
+        return await self.stream_bytes(
+            "POST",
             "downloads/summary",
             params=params or None,
             json={"ids": ids_param},
         )
-        if not isinstance(res, str):
-            raise ValueError(f"Expected CSV string response from downloads/summary, got {type(res)}")
-        return res
+
+    async def fetch_collection_bundle(
+        self,
+        uuid: str,
+        *,
+        with_distances: bool = True,
+        with_metadata: bool = True,
+        matrix_type: str = "difference",
+        dataset_name: str | None = None,
+        strict_distances: bool = False,
+        analysis_types: Sequence[str] | str | None = None,
+    ) -> PathogenwatchCollectionBundle:
+        """Downloads collection details, genomes, analyses, metadata, and distance matrix in memory.
+
+        Args:
+            uuid: Short UUID of the collection.
+            with_distances: Whether to download the pairwise distance matrix CSV.
+            with_metadata: Whether to download spatiotemporal isolate metadata CSV.
+            matrix_type: Distance matrix type (``"difference"`` or ``"score"``).
+            dataset_name: Optional custom name override. Defaults to the collection title.
+            strict_distances: If ``True``, raise if the distance matrix endpoint fails.
+                If ``False`` (default), fall back to Newick tree or emit a ``RuntimeWarning``.
+            analysis_types: Optional analysis name or sequence of analysis names to fetch.
+                When ``None``, automatically selects ``"kleborate"`` if available, else ``"kaptive"``.
+
+        Returns:
+            In-memory ``PathogenwatchCollectionBundle`` containing all downloaded CSV byte buffers.
+        """
+        prog = current_progress()
+        prog.report(
+            0.05,
+            message="Fetching Pathogenwatch collection",
+            detail=f"Metadata and isolate list for {uuid}...",
+            force=True,
+        )
+
+        async def _try_matrix() -> tuple[bytes | None, Exception | None]:
+            if not with_distances:
+                return None, None
+            try:
+                return await self.download_distance_matrix(uuid=uuid, matrix_type=matrix_type), None
+            except Exception as exc:
+                return None, exc
+
+        matrix_task = asyncio.create_task(_try_matrix())
+        try:
+            with prog.subrange(0.05, 0.25, message="Fetching Pathogenwatch collection"):
+                details, records = await asyncio.gather(
+                    self.get_collection(uuid),
+                    self.get_collection_genomes(uuid, all_pages=True),
+                )
+        except Exception:
+            matrix_task.cancel()
+            raise
+
+        resolved_name = dataset_name or str(details.get("name") or "") or f"Pathogenwatch {uuid}"
+        genome_ids = [str(r["id"]) for r in records if "id" in r]
+        if not genome_ids:
+            matrix_task.cancel()
+            raise ValueError(f"Collection '{resolved_name}' ({uuid}) contains no genomes.")
+
+        raw_downloads = details.get("downloads", [])
+        available_downloads = {
+            str(d.get("name", "")).strip().lower(): d.get("job")
+            for d in raw_downloads
+            if isinstance(d, dict) and d.get("name")
+        }
+
+        if analysis_types is None:
+            requested_analyses = [a for a in ("kleborate", "kaptive") if a in available_downloads][:1]
+        elif isinstance(analysis_types, str):
+            clean_a = analysis_types.strip().lower()
+            requested_analyses = [clean_a] if clean_a and clean_a in available_downloads else []
+        else:
+            requested_analyses = []
+            for a in analysis_types:
+                clean_a = str(a).strip().lower()
+                if clean_a and clean_a in available_downloads and clean_a not in requested_analyses:
+                    requested_analyses.append(clean_a)
+
+        prog.report(
+            0.25,
+            message=f"Downloading '{resolved_name}' ({len(genome_ids):,} isolates)",
+            detail="Requesting genotypes, metadata, and distance matrix...",
+            force=True,
+        )
+        completed_downloads = 0
+        total_downloads = max(1, len(requested_analyses)) + int(with_metadata) + int(with_distances)
+
+        def _bump_download(stage_label: str) -> None:
+            nonlocal completed_downloads
+            completed_downloads += 1
+            frac = 0.25 + 0.75 * (completed_downloads / max(1, total_downloads))
+            prog.report(frac, message=f"Downloading '{resolved_name}'", detail=stage_label, force=True)
+
+        async def _fetch_single_analysis(kind: str) -> tuple[str, bytes]:
+            raw_bytes = await self.download_analysis(
+                uuid=uuid,
+                download_type=kind,
+                job=available_downloads[kind],
+                genome_ids=genome_ids,
+            )
+            _bump_download(f"Genotype calls ({kind.capitalize()}) downloaded")
+            return kind, raw_bytes
+
+        async def _fetch_genotypes() -> list[tuple[str, bytes]]:
+            if not requested_analyses:
+                _bump_download("No genotype export required")
+                return []
+            return list(await asyncio.gather(*(_fetch_single_analysis(k) for k in requested_analyses)))
+
+        async def _fetch_meta() -> bytes | None:
+            if with_metadata:
+                res = await self.download_metadata(uuid=uuid, genome_ids=genome_ids)
+                _bump_download("Spatiotemporal metadata downloaded")
+                return res
+            return None
+
+        trees_list = details.get("trees") or []
+        fallback_newick = (
+            str(trees_list[0].get("newick", "")).strip().encode("utf-8")
+            if (isinstance(trees_list, list) and trees_list and isinstance(trees_list[0], dict))
+            else b""
+        )
+
+        async def _fetch_distances() -> bytes | None:
+            res, exc = await matrix_task
+            if not with_distances:
+                return None
+            if exc is not None:
+                if strict_distances:
+                    raise exc
+                if fallback_newick:
+                    _bump_download("Using collection Newick tree for pairwise distances")
+                    return None
+                warnings.warn(
+                    f"Could not download '{matrix_type}' distance matrix for Pathogenwatch collection "
+                    f"'{uuid}' ({exc}); proceeding without pairwise distances.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _bump_download("Distance matrix unavailable (skipped)")
+                return None
+            _bump_download("Pairwise distance matrix downloaded")
+            return res
+
+        geno_items, meta_csv, dist_csv = await asyncio.gather(
+            _fetch_genotypes(),
+            _fetch_meta(),
+            _fetch_distances(),
+        )
+
+        if not geno_items and meta_csv is None:
+            raise ValueError(f"Collection '{uuid}' has no genotype or metadata exports available.")
+
+        return PathogenwatchCollectionBundle(
+            uuid=uuid,
+            name=resolved_name,
+            details=details,
+            records=tuple(records),
+            analyses=tuple(geno_items),
+            metadata_csv=meta_csv,
+            matrix_csv=dist_csv,
+            fallback_newick=fallback_newick,
+        )
 
     async def download_collection_files(
         self,
@@ -396,8 +585,10 @@ class PathogenwatchBaseClient(Client):
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         paths: dict[str, Path] = {}
+        prog = current_progress()
+        prog.report(0.05, message=f"Downloading collection {uuid}", detail="Fetching collection details...")
 
-        async def _try_matrix_raw() -> str | None:
+        async def _try_matrix_raw() -> bytes | None:
             if not include_matrix:
                 return None
             return await self.download_distance_matrix(uuid=uuid, matrix_type=matrix_type)
@@ -433,20 +624,22 @@ class PathogenwatchBaseClient(Client):
             tasks.append(self.download_metadata(uuid=uuid, genome_ids=genome_ids, prefix=prefix))
             task_names.append("metadata")
 
+        prog.report(0.35, message=f"Downloading collection {uuid}", detail="Downloading analysis exports...")
         results = list(await asyncio.gather(*tasks)) if tasks else []
         if include_matrix and matrix_csv is not None:
             task_names.append(f"{matrix_type}_matrix")
             results.append(matrix_csv)
 
-        async def _write_csv(name: str, csv_text: str) -> tuple[str, Path]:
+        async def _write_csv(name: str, csv_bytes: bytes) -> tuple[str, Path]:
             fpath = out / f"{name}.csv"
-            await asyncio.to_thread(fpath.write_text, csv_text, encoding="utf-8")
+            await asyncio.to_thread(fpath.write_bytes, csv_bytes)
             return name, fpath
 
-        written = await asyncio.gather(*(_write_csv(n, txt) for n, txt in zip(task_names, results, strict=True)))
+        written = await asyncio.gather(*(_write_csv(n, raw) for n, raw in zip(task_names, results, strict=True)))
         for name, fpath in written:
             paths[name] = fpath
 
+        prog.report(1.0, message=f"Downloaded collection {uuid}", detail=f"{len(paths)} files written", force=True)
         return paths
 
     @staticmethod
@@ -490,8 +683,8 @@ class PathogenwatchBaseClient(Client):
         """Synchronously fetches genome analysis records for a collection."""
         return self.run_sync(self.get_collection_genomes(uuid, share_id=share_id, page=page, all_pages=all_pages))
 
-    def download_distance_matrix_sync(self, uuid: str, matrix_type: str = "difference") -> str:
-        """Synchronously downloads the pairwise genomic distance matrix CSV for a collection."""
+    def download_distance_matrix_sync(self, uuid: str, matrix_type: str = "difference") -> bytes:
+        """Synchronously downloads the pairwise genomic distance matrix CSV bytes for a collection."""
         return self.run_sync(self.download_distance_matrix(uuid, matrix_type=matrix_type))
 
     def download_analysis_sync(
@@ -501,8 +694,8 @@ class PathogenwatchBaseClient(Client):
         job: str | None = None,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Synchronously downloads discrete analysis CSV results for a collection."""
+    ) -> bytes:
+        """Synchronously downloads discrete analysis CSV bytes for a collection."""
         return self.run_sync(
             self.download_analysis(
                 uuid=uuid,
@@ -518,8 +711,8 @@ class PathogenwatchBaseClient(Client):
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Synchronously downloads Kleborate analysis CSV for a collection."""
+    ) -> bytes:
+        """Synchronously downloads Kleborate analysis CSV bytes for a collection."""
         return self.run_sync(self.download_kleborate(uuid=uuid, genome_ids=genome_ids, prefix=prefix))
 
     def download_kaptive_sync(
@@ -527,8 +720,8 @@ class PathogenwatchBaseClient(Client):
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Synchronously downloads Kaptive analysis CSV for a collection."""
+    ) -> bytes:
+        """Synchronously downloads Kaptive analysis CSV bytes for a collection."""
         return self.run_sync(self.download_kaptive(uuid=uuid, genome_ids=genome_ids, prefix=prefix))
 
     def download_metadata_sync(
@@ -536,8 +729,8 @@ class PathogenwatchBaseClient(Client):
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Synchronously downloads isolate metadata CSV for a collection."""
+    ) -> bytes:
+        """Synchronously downloads isolate metadata CSV bytes for a collection."""
         return self.run_sync(self.download_metadata(uuid=uuid, genome_ids=genome_ids, prefix=prefix))
 
     def download_summary_sync(
@@ -545,8 +738,8 @@ class PathogenwatchBaseClient(Client):
         uuid: str,
         genome_ids: Sequence[str] | None = None,
         prefix: str | None = None,
-    ) -> str:
-        """Synchronously downloads summary CSV for a collection."""
+    ) -> bytes:
+        """Synchronously downloads summary CSV bytes for a collection."""
         return self.run_sync(self.download_summary(uuid=uuid, genome_ids=genome_ids, prefix=prefix))
 
     def download_collection_files_sync(
@@ -571,3 +764,35 @@ class PathogenwatchBaseClient(Client):
                 prefix=prefix,
             )
         )
+
+    def fetch_collection_bundle_sync(
+        self,
+        uuid: str,
+        *,
+        with_distances: bool = True,
+        with_metadata: bool = True,
+        matrix_type: str = "difference",
+        dataset_name: str | None = None,
+        strict_distances: bool = False,
+        analysis_types: Sequence[str] | str | None = None,
+    ) -> PathogenwatchCollectionBundle:
+        """Synchronously downloads a collection bundle in memory."""
+        return self.run_sync(
+            self.fetch_collection_bundle(
+                uuid=uuid,
+                with_distances=with_distances,
+                with_metadata=with_metadata,
+                matrix_type=matrix_type,
+                dataset_name=dataset_name,
+                strict_distances=strict_distances,
+                analysis_types=analysis_types,
+            )
+        )
+
+
+__all__ = [
+    "PATHOGENWATCH_API_URL",
+    "PathogenwatchClient",
+    "PathogenwatchCollection",
+    "PathogenwatchCollectionBundle",
+]
