@@ -8,14 +8,13 @@ and ragged SoA container hierarchy:
 - [`ArborescenceSolver`][seroverse.core.graph.arborescence.ArborescenceSolver]: Configurable solver for maximum/minimum and $k$-best directed spanning arborescences.
 """
 
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Self, overload
+from typing import ClassVar, Literal, Self
 
 import numpy as np
 from numba import njit
 
-from seroverse.core.collections import RaggedArrayContainer, ScalarView
+from seroverse.core.collections import Float64Array, Int32Array, RaggedArrayContainer, ScalarView
 
 _NEG_INF = -1e30
 
@@ -214,9 +213,9 @@ class Arborescence(ScalarView):
         root: Root vertex index (`0 <= root < N`). Defaults to `0`.
     """
 
-    parents: np.ndarray[tuple[int], np.dtype[np.int32]]
+    parents: Int32Array
     score: float
-    slots: np.ndarray[tuple[int], np.dtype[np.int32]]
+    slots: Int32Array
     root: int = 0
 
     @property
@@ -279,116 +278,22 @@ class Arborescences(RaggedArrayContainer[Arborescence, "Arborescences"]):
     r"""Ragged Structure-of-Arrays (SoA) container of [`Arborescence`][seroverse.core.graph.arborescence.Arborescence] trees.
 
     Attributes:
-        scores: 1D `float64` array of total tree scores/costs of shape `(B,)`.
-        roots: 1D `int32` array of root vertex indices of shape `(B,)`.
         parents: Flat 1D `int32` array of concatenated parent pointers across all trees.
+        scores: 1D `float64` array of total tree scores/costs of shape `(B,)`.
         slots: Flat 1D `int32` array of concatenated incoming edge slot indices across all trees.
+        roots: 1D `int32` array of root vertex indices of shape `(B,)`.
         offsets: 1D `int32` array of starting indices into `parents` and `slots` per tree.
         lengths: 1D `int32` array of vertex counts per tree.
     """
 
-    scores: np.ndarray[tuple[int], np.dtype[np.float64]]
-    roots: np.ndarray[tuple[int], np.dtype[np.int32]]
-    parents: np.ndarray[tuple[int], np.dtype[np.int32]]
-    slots: np.ndarray[tuple[int], np.dtype[np.int32]]
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]]
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]]
+    _ragged_fields: ClassVar[tuple[str, ...]] = ("parents", "slots")
 
-    def __len__(self) -> int:
-        r"""Return the number of arborescences in the container."""
-        return len(self.offsets)
-
-    @overload
-    def __getitem__(self, item: int | np.integer[Any]) -> Arborescence: ...
-
-    @overload
-    def __getitem__(self, item: slice | np.ndarray[tuple[int], Any] | list[Any]) -> Arborescences: ...
-
-    @overload
-    def __getitem__(
-        self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]
-    ) -> Arborescence | Arborescences: ...
-
-    def __getitem__(
-        self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]
-    ) -> Arborescence | Arborescences:
-        r"""Extract a single [`Arborescence`][seroverse.core.graph.arborescence.Arborescence] or a sliced [`Arborescences`][seroverse.core.graph.arborescence.Arborescences] batch."""
-        if isinstance(item, (int, np.integer)):
-            idx = int(item)
-            if idx < 0:
-                idx += len(self)
-            if idx < 0 or idx >= len(self):
-                raise IndexError(f"Arborescences index {item} out of bounds [0, {len(self) - 1}].")
-            off = int(self.offsets[idx])
-            length = int(self.lengths[idx])
-            return Arborescence(
-                parents=self.parents[off : off + length],
-                score=float(self.scores[idx]),
-                slots=self.slots[off : off + length],
-                root=int(self.roots[idx]),
-            )
-
-        indices, new_offsets, new_lengths, (new_parents, new_slots) = self._slice_ragged(item, self.parents, self.slots)
-        if len(indices) == 0:
-            return self.empty()
-        return type(self)(
-            scores=self.scores[indices],
-            roots=self.roots[indices],
-            parents=new_parents,
-            slots=new_slots,
-            offsets=new_offsets,
-            lengths=new_lengths,
-        )
-
-    @classmethod
-    def empty(cls) -> Self:
-        r"""Return an empty 0-length [`Arborescences`][seroverse.core.graph.arborescence.Arborescences] container."""
-        return cls(
-            scores=np.empty(0, dtype=np.float64),
-            roots=np.empty(0, dtype=np.int32),
-            parents=np.empty(0, dtype=np.int32),
-            slots=np.empty(0, dtype=np.int32),
-            offsets=np.empty(0, dtype=np.int32),
-            lengths=np.empty(0, dtype=np.int32),
-        )
-
-    @classmethod
-    def concat(cls, batches: Iterable[Self]) -> Self:
-        r"""Concatenate multiple [`Arborescences`][seroverse.core.graph.arborescence.Arborescences] containers into a single batch."""
-        non_empty = [b for b in batches if len(b) > 0]
-        if not non_empty:
-            return cls.empty()
-        lengths = np.concatenate([b.lengths for b in non_empty])
-        parents_parts = [b.parents for b in non_empty if len(b.parents) > 0]
-        slots_parts = [b.slots for b in non_empty if len(b.slots) > 0]
-        return cls(
-            scores=np.concatenate([b.scores for b in non_empty]),
-            roots=np.concatenate([b.roots for b in non_empty]),
-            parents=np.concatenate(parents_parts) if parents_parts else np.empty(0, dtype=np.int32),
-            slots=np.concatenate(slots_parts) if slots_parts else np.empty(0, dtype=np.int32),
-            offsets=cls.lengths_to_offsets(lengths),
-            lengths=lengths,
-        )
-
-    @classmethod
-    def from_list(cls, items: Sequence[Arborescence]) -> Self:
-        r"""Pack a sequence of [`Arborescence`][seroverse.core.graph.arborescence.Arborescence] scalar views into a ragged container."""
-        if not items:
-            return cls.empty()
-        lengths = np.array([len(a.parents) for a in items], dtype=np.int32)
-        has_elems = bool(np.any(lengths > 0))
-        return cls(
-            scores=np.array([a.score for a in items], dtype=np.float64),
-            roots=np.array([a.root for a in items], dtype=np.int32),
-            parents=np.concatenate([a.parents.astype(np.int32, copy=False) for a in items if len(a.parents) > 0])
-            if has_elems
-            else np.empty(0, dtype=np.int32),
-            slots=np.concatenate([a.slots.astype(np.int32, copy=False) for a in items if len(a.slots) > 0])
-            if has_elems
-            else np.empty(0, dtype=np.int32),
-            offsets=cls.lengths_to_offsets(lengths),
-            lengths=lengths,
-        )
+    parents: Int32Array
+    scores: Float64Array
+    slots: Int32Array
+    roots: Int32Array
+    offsets: Int32Array
+    lengths: Int32Array
 
     @classmethod
     def k_best(

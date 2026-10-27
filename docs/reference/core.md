@@ -56,9 +56,15 @@ Core Structure-of-Arrays (SoA) protocols, genomic intervals, sequence & alphabet
 
 ---
 
-## Pairwise Alignment (`seroverse.core.seq.pairwise`)
+## Substitution Matrices, Seeds, Pairwise Alignment & Collinear Chaining (`seroverse.core.align`)
 
-::: seroverse.core.seq.pairwise
+::: seroverse.core.align.score
+
+::: seroverse.core.align.seeds
+
+::: seroverse.core.align.pairwise
+
+::: seroverse.core.align.chaining
 
 ---
 

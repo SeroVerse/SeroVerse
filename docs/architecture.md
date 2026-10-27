@@ -31,32 +31,61 @@ All batched biological entities across SeroVerse implement [`BatchedContainer`][
 - **Flat Contiguous Memory**: Variable-length sequences ([`Sequences`][seroverse.core.seq.seq.Sequences]), orthogroup clusters ([`Clusters`][seroverse.core.seq.clustering.Clusters]), and genomic intervals ([`Intervals`][seroverse.core.interval.Intervals]) pack all elements into contiguous 1D NumPy buffers indexed by `offsets` and `lengths` (`int32`).
 - **$O(1)$ Contiguous Views & Parallel Gathering**: Slicing a [`RaggedArrayContainer`][seroverse.core.collections.RaggedArrayContainer] with a contiguous slice (`seqs[start:stop]`) returns a zero-copy NumPy view in $O(1)$ time; boolean masks or arbitrary index arrays dispatch to a parallel Numba gather kernel.
 - **Lazy Scalar Views**: Indexing a single element (`seqs[i]` or `intervals[i]`) materializes an immutable `@dataclass(frozen=True, slots=True)` [`ScalarView`][seroverse.core.collections.ScalarView] on demand.
+- **Compiled Ontology & Spec Registries ([`Spec`][seroverse.core.collections.Spec], [`SpecContainer`][seroverse.core.collections.SpecContainer], [`SpecEnum`][seroverse.core.collections.SpecEnum])**: Formalizes the declarative scalar `Spec` $\rightarrow$ read-only SoA `SpecContainer` singleton $\rightarrow$ 0-based `SpecEnum(IntEnum)` registry pattern used across downstream ontologies (`GeneRole`, `LocusArchetype`, `BacterialSpecies`, `Sugars`), providing automatic `write=False` array freezing, `Enum` field coercion, and $O(1)$ case-insensitive name/key resolution (`.specs()`, `.spec`, `.from_name()`, `.resolve()`).
 
 ```mermaid
 classDiagram
     class ScalarView {
-        <<Protocol>>
+        +replace(**changes) Self
+        +to_dict() dict
+        +__eq__(other) bool
+    }
+    class Spec {
+        +name: bytes
+        +name_str: str
     }
     class BatchedContainer~T, S~ {
-        <<Protocol>>
+        +_field_dtypes: dict[str, dtype]
         +__len__() int
         +__getitem__(item) T | S
+        +filter(mask) S
+        +argsort(*by, descending) Int32Array
+        +sort_by(*by, descending) S
+        +chunks(size) Iterator[S]
+        +to_dict() dict
         +empty() S
         +concat(batches) S
+        +from_list(items) S
+    }
+    class SpecContainer~T, S~ {
+        +names: BytesArray
+        +index(key) int
+        +resolve_index(key, default) int
+    }
+    class SpecEnum {
+        +specs() SpecContainer
+        +spec: Spec
+        +from_name(key) Self
+        +resolve(key, default) Self
     }
     class RaggedArrayContainer~T, S~ {
-        <<Protocol>>
-        +offsets: ndarray[int32]
-        +lengths: ndarray[int32]
-        +indptr: ndarray[int32]
+        +_ragged_fields: tuple[str, ...]
+        +offsets: Int32Array
+        +lengths: Int32Array
+        +indptr: Int32Array
+        +pad(field_name, max_len, fill_value) ndarray
     }
+    ScalarView <|-- Spec
+    BatchedContainer <|-- SpecContainer
     BatchedContainer <|-- RaggedArrayContainer
     BatchedContainer <|-- Graphs
-    BatchedContainer <|.. Intervals
-    BatchedContainer <|.. Seeds
-    BatchedContainer <|.. PairwiseAlignments
-    RaggedArrayContainer <|.. Sequences
-    RaggedArrayContainer <|.. Clusters
+    BatchedContainer <|-- Intervals
+    BatchedContainer <|-- Seeds
+    BatchedContainer <|-- PairwiseAlignments
+    RaggedArrayContainer <|-- Sequences
+    RaggedArrayContainer <|-- Clusters
+    RaggedArrayContainer <|-- Chains
+    RaggedArrayContainer <|-- Arborescences
 ```
 
 ---
@@ -69,8 +98,11 @@ classDiagram
 - **Syncmer-Linked Randstrobes & FracMinHash ([`kmers.py`][seroverse.core.seq.kmers])**:
   - [`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex] links pairs of open syncmers into 64-bit strobemer hashes stored in a CSR lookup table for $O(1)$ seed matching across variable-rate indels.
   - [`FracMinHashIndex`][seroverse.core.seq.kmers.FracMinHashIndex] computes scaled bottom-hash sketches for rapid containment and Jaccard similarity estimation.
-- **Vectorized Smith-Waterman-Gotoh Alignment ([`pairwise.py`][seroverse.core.seq.pairwise])**:
-  - [`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner] executes parallel `@njit(nogil=True, parallel=True)` affine-gap local and semi-global alignments (both X-drop/banded around strobemer seeds and unbanded all-vs-all) with `BLOSUM62` or custom substitution matrices, returning a [`PairwiseAlignments`][seroverse.core.seq.pairwise.PairwiseAlignments] SoA batch.
+- **Vectorized Alignment, Seeds, Wavefronts & Collinear Chaining ([`score.py`][seroverse.core.align.score], [`seeds.py`][seroverse.core.align.seeds], [`pairwise.py`][seroverse.core.align.pairwise], [`chaining.py`][seroverse.core.align.chaining])**:
+  - [`SubstitutionMatrix`][seroverse.core.align.score.SubstitutionMatrix] provides singleton-cached $256 \times 256$ `int8` ASCII lookup tables (`BLOSUM62`, `BLOSUM80`, `BLOSUM45`, `DNA`, and `.from_match_mismatch()`) and Karlin-Altschul ($\lambda, K$) bitscore conversions.
+  - [`Seed`][seroverse.core.align.seeds.Seed] and [`Seeds`][seroverse.core.align.seeds.Seeds] unify pair-level consensus diagonal seeds and unaggregated `(q_pos, t_pos, span)` chaining anchors in a single SoA batch container.
+  - [`PairwiseAligner`][seroverse.core.align.pairwise.PairwiseAligner] executes parallel `@njit(nogil=True, parallel=True)` affine-gap alignments across three engines—adaptive block-shifting Smith-Waterman-Gotoh (`mode="block"`), Affine Wavefront Alignment (`mode="wfa"`, WFA2), and static-band rolling-row Gotoh (`mode="banded"`)—alongside MMseqs2-style 4-mer CSR + ungapped diagonal prefiltering (`.prefilter()`, `.search()`), returning a [`PairwiseAlignments`][seroverse.core.align.pairwise.PairwiseAlignments] SoA batch.
+  - [`Chainer`][seroverse.core.align.chaining.Chainer], [`Chains`][seroverse.core.align.chaining.Chains], and [`Chain`][seroverse.core.align.chaining.Chain] implement `minimap2`-style concave-gap collinear anchor chaining over unaggregated [`Seeds`][seroverse.core.align.seeds.Seeds] (`hits(..., aggregate=False)`), primary/secondary chain classification, and piecewise WFA2 inter-anchor gap filling + adaptive block X-drop extension.
 
 ---
 
@@ -78,7 +110,7 @@ classDiagram
 
 [`Clusterer`][seroverse.core.seq.clustering.Clusterer] groups proteins or nucleotide sequences into non-redundant orthogroups ([`Clusters`][seroverse.core.seq.clustering.Clusters] ragged SoA container with zero-copy `.as_csr()` membership matrices) through a 4-stage pipeline:
 
-1. **Exact & Strobemer Seeding**: Deduplicates identical sequences via 64-bit `FNV-1a` hashes ([`Sequences.unique`][seroverse.core.seq.seq.Sequences.unique]), builds syncmer-linked [`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex] lookup tables, and aligns candidate pairs with banded Smith-Waterman-Gotoh ([`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner]).
+1. **Exact & Strobemer Seeding**: Deduplicates identical sequences via 64-bit `FNV-1a` hashes ([`Sequences.unique`][seroverse.core.seq.seq.Sequences.unique]), builds syncmer-linked [`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex] lookup tables, and aligns candidate pairs with banded Smith-Waterman-Gotoh ([`PairwiseAligner`][seroverse.core.align.pairwise.PairwiseAligner]).
 2. **Reduced-Alphabet `MMSEQS12` Diagonal Prefilter**: In sensitive/MCL mode, builds a $12^4 = 20,736$-bucket CSR inverted index of `Alphabet.MMSEQS12` 4-mers, scores ungapped BLOSUM62 diagonals, and evaluates intra-role pairs via unbanded Smith-Waterman-Gotoh so divergent homologs are aligned even when they share zero exact k-mers.
 3. **Role-Gated Motif-Embedding Rescue**: When neural motif embeddings (e.g., from `SeroRef`'s `GeneRoleClassifier`) are provided, pairs sharing the same functional role with active-site cosine similarity $\ge \tau_{\text{motif}}$ (`motif_rescue_threshold=0.75`) are rescued down to `15%` sequence identity and blended into the alignment bitscore graph.
 4. **Compiled Graph Clustering Kernels**:

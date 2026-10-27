@@ -11,20 +11,27 @@ Key Classes:
     - [`GeneticCode`][seroverse.core.seq.alphabet.GeneticCode]: NCBI genetic code translator.
 """
 
-from collections.abc import Generator, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Self, cast, overload
+from typing import Any, ClassVar, Self, cast, overload
 
 import numpy as np
 from numba import njit, prange
 
-from seroverse.core.collections import RaggedArrayContainer
+from seroverse.core.collections import (
+    BoolArray,
+    BytesArray,
+    Int32Array,
+    RaggedArrayContainer,
+    ScalarView,
+    UInt8Array,
+)
 from seroverse.core.seq.alphabet import Alphabet, GeneticCode
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
-class Sequence:
+class Sequence(ScalarView):
     r"""A simple, immutable container for a single biological sequence.
 
     Attributes:
@@ -88,7 +95,7 @@ class Sequence:
 
 
 @dataclass(frozen=True, slots=True)
-class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
+class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
     r"""A high-performance SoA container for biological sequences.
 
     Stores multiple sequences in a flat, contiguous memory layout using a 1D NumPy array
@@ -96,24 +103,26 @@ class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
     of offsets and lengths.
 
     Attributes:
-        ids (np.ndarray): 1D byte string array of identifiers for each sequence.
-        seqs (np.ndarray): Single flat 1D array containing all sequence byte data concatenated.
-        offsets (np.ndarray): 1D array of start indices in `seqs`.
-        lengths (np.ndarray): 1D array of sequence lengths.
+        ids (BytesArray): 1D byte string array of identifiers for each sequence.
+        seqs (UInt8Array): Single flat 1D array containing all sequence byte data concatenated.
+        offsets (Int32Array): 1D array of start indices in `seqs`.
+        lengths (Int32Array): 1D array of sequence lengths.
     """
 
-    ids: np.ndarray[tuple[int], np.dtype[np.bytes_]]
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]]  # concatenated sequences
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]]  # start index per sequence
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]]  # length per sequence
+    _ragged_fields: ClassVar[tuple[str, ...]] = ("seqs",)
 
-    def __len__(self) -> int:
-        r"""Return the total number of sequences in the batch.
+    ids: BytesArray
+    seqs: UInt8Array  # concatenated sequences
+    offsets: Int32Array  # start index per sequence
+    lengths: Int32Array  # length per sequence
 
-        Returns:
-            int: Number of sequence records in the container.
-        """
-        return len(self.ids)
+    def _get_scalar(self, idx: int) -> Sequence:
+        r"""Materialize the [`Sequence`][seroverse.core.seq.seq.Sequence] at index `idx`."""
+        offset_val = int(self.offsets[idx])
+        return Sequence(
+            self.ids[idx],
+            bytes(self.seqs.data[offset_val : offset_val + int(self.lengths[idx])]),
+        )
 
     def to_fasta(self, use_indices: bool = False) -> bytes:
         r"""Format the entire batch as a single FASTA byte string.
@@ -139,53 +148,14 @@ class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
             for name, o, length_val in zip(self.ids, self.offsets, self.lengths, strict=False)
         )
 
-    @classmethod
-    def empty(cls) -> Self:
-        r"""Create an empty Sequences object with zero-length arrays.
-
-        Returns:
-            Sequences: An empty sequences container.
-        """
-        return cls(
-            np.empty(0, dtype="S"),
-            np.empty(0, dtype=np.uint8),
-            np.empty(0, dtype=np.int32),
-            np.empty(0, dtype=np.int32),
-        )
-
-    @classmethod
-    def concat(cls, batches: Iterable[Self]) -> Self:
-        r"""Concatenate multiple Sequences containers into a single larger collection.
-
-        Args:
-            batches (Iterable[Sequences]): An iterable of sequence batches to combine.
-
-        Returns:
-            Sequences: A combined sequences container.
-        """
-        batches_list = list(batches)
-        if not batches_list:
-            return cls.empty()
-
-        all_ids = (
-            np.concatenate([b.ids for b in batches_list])
-            if any(len(b.ids) > 0 for b in batches_list)
-            else np.empty(0, dtype="S")
-        )
-        all_seqs = np.concatenate([b.seqs for b in batches_list])
-        all_lengths = np.concatenate([b.lengths for b in batches_list])
-        offsets = cls.lengths_to_offsets(all_lengths)
-
-        return cls(all_ids, all_seqs, offsets, all_lengths)
-
     @property
-    def internal_stops(self) -> np.ndarray:
+    def internal_stops(self) -> BoolArray:
         r"""Vectorized check for internal stop codons in protein sequences.
 
         Scans each sequence for the stop codon character ('*') before the final position using a Numba kernel.
 
         Returns:
-            np.ndarray: A 1D boolean array where True indicates presence of an internal stop.
+            BoolArray: A 1D boolean array where True indicates presence of an internal stop.
         """
         return _internal_stops_kernel(self.seqs, self.offsets, self.lengths)
 
@@ -289,55 +259,14 @@ class Sequences(RaggedArrayContainer["Sequence", "Sequences"]):
         self,
         item: int | np.integer[Any] | slice | np.ndarray[Any, Any] | list[Any] | bytes | np.bytes_,
     ) -> Sequence | Sequences:
-        r"""Access sequences by index, slice, boolean mask, or byte identifier(s).
-
-        Args:
-            item: An integer index, slice, array mask, list of indices, or byte identifier(s).
-
-        Returns:
-            Sequence | Sequences: A single [`Sequence`][seroverse.core.seq.seq.Sequence] if integer index
-                or single byte identifier is passed, or a sliced [`Sequences`][seroverse.core.seq.seq.Sequences] collection.
-
-        Raises:
-            IndexError: If an integer index is out of bounds.
-            KeyError: If a byte identifier is not found.
-        """
-        if isinstance(item, (int, np.integer)):
-            item_idx = int(item)
-            if item_idx < 0:
-                item_idx += len(self)
-            if item_idx < 0 or item_idx >= len(self):
-                raise IndexError("Sequence index out of range")
-            offset_val = self.offsets[item_idx]
-            return Sequence(
-                self.ids[item_idx],
-                bytes(self.seqs.data[offset_val : offset_val + self.lengths[item_idx]]),
-            )
-
+        r"""Access sequences by index, slice, boolean mask, or byte identifier(s)."""
         if isinstance(item, (bytes, np.bytes_)):
             return self.by_ids(item)
-
         if isinstance(item, np.ndarray) and item.dtype.kind in ("S", "a"):
             return self.by_ids(item)
-
         if isinstance(item, list) and len(item) > 0 and isinstance(item[0], (bytes, np.bytes_)):
             return self.by_ids(cast(Iterable[bytes], item))
-
-        indices, new_offsets, new_lengths, (new_seqs,) = self._slice_ragged(item, self.seqs)
-        if len(indices) == 0:
-            return self.empty()
-        return Sequences(self.ids[indices], new_seqs, new_offsets, new_lengths)
-
-    def __iter__(self) -> Generator[Sequence]:
-        r"""Iterate over the batch, yielding a Sequence for each sequence.
-
-        Yields:
-            Sequence: Scalar record for each sequence in the batch.
-        """
-        mv = self.seqs.data
-        for i in range(len(self)):
-            offset_val = self.offsets[i]
-            yield Sequence(self.ids[i], bytes(mv[offset_val : offset_val + self.lengths[i]]))
+        return super().__getitem__(item)
 
     @classmethod
     def from_bytes(

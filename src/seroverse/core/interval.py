@@ -5,14 +5,10 @@ strand representations via [`Strand`][seroverse.core.interval.Strand], and high-
 vectorized interval collections via [`Intervals`][seroverse.core.interval.Intervals].
 """
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any, Self, overload
 
-import numpy as np
-
-from seroverse.core.collections import BatchedContainer
+from seroverse.core.collections import BatchedContainer, Int8Array, Int32Array, ScalarView
 
 
 # Enums ----------------------------------------------------------------------------------------------------------------
@@ -69,10 +65,8 @@ class Strand(IntEnum):
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
-class Interval:
+class Interval(ScalarView):
     r"""A single 0-based, half-open genomic interval with strand orientation.
 
     Represents a discrete sequence segment defined by `start` (inclusive), `end` (exclusive),
@@ -105,103 +99,20 @@ class Intervals(BatchedContainer[Interval, "Intervals"]):
     for memory-efficient vectorized operations and Numba spatial algorithms.
 
     Attributes:
-        starts (np.ndarray[tuple[int], np.dtype[np.int32]]): 1D array of 0-based start coordinates.
-        ends (np.ndarray[tuple[int], np.dtype[np.int32]]): 1D array of 0-based end coordinates.
-        strands (np.ndarray[tuple[int], np.dtype[np.int8]]): 1D array of strand values (+1, -1, 0).
+        starts (Int32Array): 1D array of 0-based start coordinates.
+        ends (Int32Array): 1D array of 0-based end coordinates.
+        strands (Int8Array): 1D array of strand values (+1, -1, 0).
     """
 
-    starts: np.ndarray[tuple[int], np.dtype[np.int32]]
-    ends: np.ndarray[tuple[int], np.dtype[np.int32]]
-    strands: np.ndarray[tuple[int], np.dtype[np.int8]]
-
-    @classmethod
-    def empty(cls) -> Self:
-        r"""Create an empty [`Intervals`][seroverse.core.interval.Intervals] object with zero-length arrays.
-
-        Returns:
-            Intervals: Empty [`Intervals`][seroverse.core.interval.Intervals] collection.
-        """
-        return cls(
-            np.empty(0, dtype=np.int32),
-            np.empty(0, dtype=np.int32),
-            np.empty(0, dtype=np.int8),
-        )
-
-    def __len__(self) -> int:
-        r"""Return the number of intervals in the batch.
-
-        Returns:
-            int: Total interval count.
-        """
-        return len(self.starts)
-
-    @overload
-    def __getitem__(self, item: int | np.integer[Any]) -> Interval: ...
-
-    @overload
-    def __getitem__(self, item: slice | np.ndarray[tuple[int], Any] | list[Any]) -> Intervals: ...
-
-    @overload
-    def __getitem__(
-        self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]
-    ) -> Interval | Intervals: ...
-
-    def __getitem__(
-        self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]
-    ) -> Interval | Intervals:
-        r"""Access intervals by integer index, slice, or boolean/integer NumPy array.
-
-        Args:
-            item (int | slice | np.ndarray | list): Integer index, slice, or NumPy mask array.
-
-        Returns:
-            Interval | Intervals: A single [`Interval`][seroverse.core.interval.Interval] or a
-                sliced [`Intervals`][seroverse.core.interval.Intervals] collection.
-
-        Raises:
-            IndexError: If integer index is out of bounds.
-        """
-        if isinstance(item, (int, np.integer)):
-            item_idx = int(item)
-            if item_idx < 0:
-                item_idx += len(self)
-            if item_idx < 0 or item_idx >= len(self):
-                raise IndexError("Batch index out of range")
-            return Interval(self.starts[item_idx], self.ends[item_idx], self.strands[item_idx])
-
-        return Intervals(
-            self.starts[item],
-            self.ends[item],
-            self.strands[item],
-        )
-
-    @classmethod
-    def concat(cls, batches: Iterable[Self]) -> Self:
-        r"""Concatenate multiple [`Intervals`][seroverse.core.interval.Intervals] collections into a single batch.
-
-        Args:
-            batches (Iterable[Intervals]): Iterable of [`Intervals`][seroverse.core.interval.Intervals] objects to merge.
-
-        Returns:
-            Intervals: Concatenated [`Intervals`][seroverse.core.interval.Intervals] collection.
-
-        Raises:
-            ValueError: If `batches` is empty.
-        """
-        batches_list = list(batches)
-        if not batches_list:
-            raise ValueError("Cannot concatenate empty list of batches")
-        return cls(
-            np.concatenate([b.starts for b in batches_list]),
-            np.concatenate([b.ends for b in batches_list]),
-            np.concatenate([b.strands for b in batches_list]),
-        )
+    starts: Int32Array
+    ends: Int32Array
+    strands: Int8Array
 
     @property
-    def lengths(self) -> np.ndarray[tuple[int], np.dtype[np.int32]]:
+    def lengths(self) -> Int32Array:
         r"""Compute the lengths of all intervals in base pairs (`ends - starts`).
 
         Returns:
-            np.ndarray[tuple[int], np.dtype[np.int32]]: 1D array of interval lengths.
+            Int32Array: 1D array of interval lengths.
         """
         return self.ends - self.starts

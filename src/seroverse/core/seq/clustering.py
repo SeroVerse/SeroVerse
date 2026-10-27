@@ -7,24 +7,24 @@ pre-filtering, parallel banded Smith-Waterman-Gotoh alignment, and sub-milliseco
 greedy set-cover / CD-HIT clustering.
 """
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Self, overload
+from typing import Any, ClassVar, Literal, Self
 
 import numpy as np
-from numba import njit, prange
+from numba import njit
 
-from seroverse.core.collections import RaggedArrayContainer
+from seroverse.core.align.pairwise import PairwiseAligner
+from seroverse.core.align.score import SubstitutionMatrix, _ungapped_pair_prefilter
+from seroverse.core.collections import Int32Array, RaggedArrayContainer, ScalarView
 from seroverse.core.graph.csr import CSR
-from seroverse.core.seq.alphabet import Alphabet
 from seroverse.core.seq.kmers import RandstrobeIndex
-from seroverse.core.seq.pairwise import PairwiseAligner, _blosum62_matrix
 from seroverse.core.seq.seq import Sequences
 
 
 # Containers -----------------------------------------------------------------------------------------------------------
-@dataclass(slots=True, frozen=True, eq=False)
-class Cluster:
+@dataclass(slots=True, frozen=True)
+class Cluster(ScalarView):
     r"""Scalar view of a single sequence cluster.
 
     Attributes:
@@ -33,17 +33,11 @@ class Cluster:
     """
 
     representative: int
-    members: np.ndarray[tuple[int], np.dtype[np.int32]]
+    members: Int32Array
 
     def __len__(self) -> int:
         r"""Return the number of member sequences in this cluster."""
         return len(self.members)
-
-    def __eq__(self, other: object) -> bool:
-        r"""Compare two Cluster views for representative and member equality."""
-        if not isinstance(other, Cluster):
-            return NotImplemented
-        return self.representative == other.representative and bool(np.array_equal(self.members, other.members))
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,14 +55,12 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
         lengths: Number of member sequences in each cluster.
     """
 
-    representatives: np.ndarray[tuple[int], np.dtype[np.int32]]
-    members: np.ndarray[tuple[int], np.dtype[np.int32]]
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]]
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]]
+    _ragged_fields: ClassVar[tuple[str, ...]] = ("members",)
 
-    def __len__(self) -> int:
-        r"""Return the total number of clusters in the container."""
-        return len(self.offsets)
+    representatives: Int32Array
+    members: Int32Array
+    offsets: Int32Array
+    lengths: Int32Array
 
     @property
     def n_clusters(self) -> int:
@@ -81,17 +73,17 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
         return len(self.members)
 
     @property
-    def sizes(self) -> np.ndarray[tuple[int], np.dtype[np.int32]]:
+    def sizes(self) -> Int32Array:
         r"""1D array of member counts for each cluster (alias for `lengths`)."""
         return self.lengths
 
     @property
-    def representative_indices(self) -> np.ndarray[tuple[int], np.dtype[np.int32]]:
+    def representative_indices(self) -> Int32Array:
         r"""1D array of centroid sequence indices (alias for `representatives`)."""
         return self.representatives
 
     @property
-    def cluster_ids(self) -> np.ndarray[tuple[int], np.dtype[np.int32]]:
+    def cluster_ids(self) -> Int32Array:
         r"""1D array mapping each sequence index to its cluster ID $c \in [0, C-1]$."""
         if len(self.members) == 0:
             return np.empty(0, dtype=np.int32)
@@ -119,63 +111,14 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
         data = np.ones(len(self.members), dtype=np.uint8)
         return CSR(indptr=self.indptr, indices=self.members, data=data, shape=(c, cols))
 
-    @overload
-    def __getitem__(self, item: int | np.integer[Any]) -> Cluster: ...
-
-    @overload
-    def __getitem__(self, item: slice | np.ndarray[tuple[int], Any] | list[Any]) -> Clusters: ...
-
-    @overload
-    def __getitem__(
-        self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]
-    ) -> Cluster | Clusters: ...
-
-    def __getitem__(
-        self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]
-    ) -> Cluster | Clusters:
-        r"""Access a single [`Cluster`][seroverse.core.seq.clustering.Cluster] or a sliced [`Clusters`][seroverse.core.seq.clustering.Clusters] subset."""
-        if isinstance(item, (int, np.integer)):
-            idx = int(item)
-            if idx < 0:
-                idx += len(self)
-            if idx < 0 or idx >= len(self):
-                raise IndexError(f"Cluster index {item} out of bounds [0, {len(self) - 1}]")
-            off = int(self.offsets[idx])
-            length = int(self.lengths[idx])
-            return Cluster(
-                representative=int(self.representatives[idx]),
-                members=self.members[off : off + length],
-            )
-
-        indices, new_offsets, new_lengths, (new_members,) = self._slice_ragged(item, self.members)
-        if len(indices) == 0:
-            return self.empty()
-
-        return type(self)(
-            representatives=self.representatives[indices],
-            members=new_members,
-            offsets=new_offsets,
-            lengths=new_lengths,
-        )
-
-    def __iter__(self) -> Iterator[Cluster]:
-        r"""Iterate over all clusters in the container."""
-        for i in range(len(self)):
-            off = int(self.offsets[i])
-            length = int(self.lengths[i])
-            yield Cluster(
-                representative=int(self.representatives[i]),
-                members=self.members[off : off + length],
-            )
-
-    def get_members(self, cluster_id: int) -> np.ndarray[tuple[int], np.dtype[np.int32]]:
+    def get_members(self, cluster_id: int) -> Int32Array:
         r"""Return 1D array of original sequence indices assigned to the specified cluster ID.
 
         Args:
             cluster_id: 0-based integer cluster identifier.
 
         Returns:
-            np.ndarray: Zero-copy slice of sequence indices belonging to this cluster.
+            Int32Array: Zero-copy slice of sequence indices belonging to this cluster.
         """
         return self[cluster_id].members
 
@@ -195,9 +138,9 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
     @classmethod
     def from_assignments(
         cls,
-        cluster_ids: np.ndarray[tuple[int], np.dtype[np.int32]],
-        representatives: np.ndarray[tuple[int], np.dtype[np.int32]],
-        sizes: np.ndarray[tuple[int], np.dtype[np.int32]],
+        cluster_ids: Int32Array,
+        representatives: Int32Array,
+        sizes: Int32Array,
     ) -> Self:
         r"""Construct a [`Clusters`][seroverse.core.seq.clustering.Clusters] container from flat cluster ID assignments.
 
@@ -222,38 +165,6 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
             lengths=sizes,
         )
 
-    @classmethod
-    def empty(cls) -> Self:
-        r"""Construct an empty 0-length [`Clusters`][seroverse.core.seq.clustering.Clusters] instance."""
-        return cls(
-            representatives=np.empty(0, dtype=np.int32),
-            members=np.empty(0, dtype=np.int32),
-            offsets=np.empty(0, dtype=np.int32),
-            lengths=np.empty(0, dtype=np.int32),
-        )
-
-    @classmethod
-    def concat(cls, batches: Iterable[Self]) -> Self:
-        r"""Concatenate multiple [`Clusters`][seroverse.core.seq.clustering.Clusters] containers into a single batch."""
-        batch_list = list(batches)
-        if not batch_list:
-            return cls.empty()
-
-        non_empty = [b for b in batch_list if len(b) > 0]
-        if not non_empty:
-            return cls.empty()
-
-        representatives = np.concatenate([b.representatives for b in non_empty])
-        lengths = np.concatenate([b.lengths for b in non_empty])
-        offsets = cls.lengths_to_offsets(lengths)
-        members = np.concatenate([b.members for b in non_empty if len(b.members) > 0])
-        return cls(
-            representatives=representatives,
-            members=members,
-            offsets=offsets,
-            lengths=lengths,
-        )
-
 
 # Clustering Engine ---------------------------------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
@@ -261,7 +172,7 @@ class Clusterer:
     r"""High-performance sequence clustering engine.
 
     Combines sparse syncmer-linked randstrobe pre-filtering ([`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex]),
-    SIMD-parallel banded Smith-Waterman-Gotoh alignment ([`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner]),
+    SIMD-parallel banded Smith-Waterman-Gotoh alignment ([`PairwiseAligner`][seroverse.core.align.pairwise.PairwiseAligner]),
     and compiled Numba clustering algorithms to group biological sequences.
 
     Modes:
@@ -285,6 +196,7 @@ class Clusterer:
         k: Strobemer seed length. Defaults to 10.
         s: Strobemer sampling stride. Defaults to 5.
         aligner_k: Bandwidth parameter ($2k + 1$ diagonals) for banded Gotoh alignment. Defaults to 20.
+        matrix: Substitution matrix for scoring and prefiltering. Defaults to `SubstitutionMatrix.BLOSUM62`.
         mode: Clustering algorithm mode. Defaults to `"cdhit"`.
         embedding_weight: Blend weight $\alpha \in [0.0, 1.0]$ for active-site motif cosine similarity
             in MCL edge weighting and role-gated twilight-zone rescue. Defaults to 0.0 (automatically
@@ -301,14 +213,15 @@ class Clusterer:
     k: int = 10
     s: int = 5
     aligner_k: int = 20
+    matrix: SubstitutionMatrix = SubstitutionMatrix.BLOSUM62
     mode: Literal["cdhit", "mcl", "greedy_cover", "upgma", "connected_components"] = "cdhit"
     embedding_weight: float = 0.0
     motif_rescue_threshold: float = 0.75
 
     @property
     def aligner(self) -> PairwiseAligner:
-        r"""Return a configured [`PairwiseAligner`][seroverse.core.seq.pairwise.PairwiseAligner] instance."""
-        return PairwiseAligner(k=self.aligner_k)
+        r"""Return a configured [`PairwiseAligner`][seroverse.core.align.pairwise.PairwiseAligner] instance."""
+        return PairwiseAligner(matrix=self.matrix, k=self.aligner_k)
 
     def cluster(
         self,
@@ -371,7 +284,13 @@ class Clusterer:
         target_idx = RandstrobeIndex.build(seqs, k=k_eff, s=s_eff, sort_by_hash=True)
         query_idx = RandstrobeIndex.build(seqs, k=k_eff, s=s_eff, sort_by_hash=False)
 
-        seeds = target_idx.hits(query_idx, min_score=min_score_eff)
+        seeds = target_idx.hits(
+            query_idx,
+            min_score=min_score_eff,
+            query_seqs=seqs,
+            target_seqs=seqs,
+            matrix=self.matrix,
+        )
         upper_mask = seeds.query_indices < seeds.target_indices
         candidate_seeds = seeds.filter(upper_mask) if len(seeds) > 0 else seeds
 
@@ -398,7 +317,7 @@ class Clusterer:
                 q_idx = q_idx[compat]
                 t_idx = t_idx[compat]
                 p_sub = alignments.pidents[compat]
-                b_sub = alignments.bitscores[compat]
+                b_sub = alignments.bitscores(self.matrix)[compat]
                 q_lens = np.maximum(seqs.lengths[q_idx], 1)
                 t_lens = np.maximum(seqs.lengths[t_idx], 1)
                 qc_sub = (alignments.q_ends[compat] - alignments.q_starts[compat]) / q_lens
@@ -447,18 +366,14 @@ class Clusterer:
                                     small_t_list.append(v_idx)
                     elif m_r > 250:
                         sub_seqs = seqs[members_r]
-                        sub_q, sub_t = _mmseqs12_k4_ungapped_prefilter(
-                            sub_seqs.seqs,
-                            sub_seqs.offsets,
-                            sub_seqs.lengths,
-                            min_cov_eff,
-                            42,
-                            Alphabet.MMSEQS12.kmer_lut,
-                            _blosum62_matrix(),
+                        sub_seeds = self.aligner.prefilter(
+                            sub_seqs,
+                            min_ungapped_score=42,
+                            min_coverage=min_cov_eff,
                         )
-                        if len(sub_q) > 0:
-                            gq = members_r[sub_q]
-                            gt = members_r[sub_t]
+                        if len(sub_seeds) > 0:
+                            gq = members_r[sub_seeds.query_indices.astype(np.int32)]
+                            gt = members_r[sub_seeds.target_indices.astype(np.int32)]
                             keep_m = np.array(
                                 [
                                     (int(u_i) * n + int(v_i)) not in seeded_pairs
@@ -497,7 +412,7 @@ class Clusterer:
                             seqs.lengths,
                             sq_arr,
                             st_arr,
-                            _blosum62_matrix(),
+                            self.matrix.lut,
                             40,
                         )
                         if emb_norm is not None:
@@ -509,16 +424,14 @@ class Clusterer:
                         extra_q_parts.append(sq_arr)
                         extra_t_parts.append(st_arr)
             else:
-                cand_q, cand_t = _mmseqs12_k4_ungapped_prefilter(
-                    seqs.seqs,
-                    seqs.offsets,
-                    seqs.lengths,
-                    min_cov_eff,
-                    42,
-                    Alphabet.MMSEQS12.kmer_lut,
-                    _blosum62_matrix(),
+                cand_seeds = self.aligner.prefilter(
+                    seqs,
+                    min_ungapped_score=42,
+                    min_coverage=min_cov_eff,
                 )
-                if len(cand_q) > 0:
+                if len(cand_seeds) > 0:
+                    cand_q = cand_seeds.query_indices.astype(np.int32)
+                    cand_t = cand_seeds.target_indices.astype(np.int32)
                     if seeded_pairs:
                         keep_m = np.array(
                             [
@@ -563,7 +476,7 @@ class Clusterer:
                 q_chunks.append(extra_q)
                 t_chunks.append(extra_t)
                 pident_chunks.append(extra_aln.pidents)
-                bitscore_chunks.append(extra_aln.bitscores)
+                bitscore_chunks.append(extra_aln.bitscores(self.matrix))
                 q_cov_chunks.append((extra_aln.q_ends - extra_aln.q_starts) / q_lens_e)
                 t_cov_chunks.append((extra_aln.t_ends - extra_aln.t_starts) / t_lens_e)
 
@@ -658,199 +571,6 @@ class Clusterer:
 
 
 # Kernels & Algorithms -------------------------------------------------------------------------------------------------
-@njit(nogil=True, cache=True, inline="always")
-def _score_ungapped_diagonal(
-    seqs_data: np.ndarray,
-    s1: int,
-    l1: int,
-    s2: int,
-    l2: int,
-    d: int,
-    matrix: np.ndarray,
-) -> int:
-    r"""Compute maximum local ungapped BLOSUM62 score along diagonal $d = i - j$."""
-    i_start = max(0, d)
-    j_start = i_start - d
-    span = min(l1 - i_start, l2 - j_start)
-    if span < 12:
-        return 0
-    cur = 0
-    max_sc = 0
-    for k in range(span):
-        cur += matrix[seqs_data[s1 + i_start + k], seqs_data[s2 + j_start + k]]
-        if cur < 0:
-            cur = 0
-        elif cur > max_sc:
-            max_sc = cur
-    return max_sc
-
-
-@njit(parallel=True, nogil=True, cache=True)
-def _ungapped_pair_prefilter(
-    seqs_data: np.ndarray,
-    offsets: np.ndarray,
-    lengths: np.ndarray,
-    q_idx: np.ndarray,
-    t_idx: np.ndarray,
-    matrix: np.ndarray,
-    min_ungapped_score: int,
-) -> np.ndarray:
-    r"""Filter candidate pairs `(q_idx, t_idx)` using MMseqs2-style ungapped BLOSUM62 diagonal scoring."""
-    n_pairs = len(q_idx)
-    keep = np.zeros(n_pairs, dtype=np.bool_)
-    for p in prange(n_pairs):  # type: ignore[not-iterable]
-        u = q_idx[p]
-        v = t_idx[p]
-        l1 = lengths[u]
-        l2 = lengths[v]
-        s1 = offsets[u]
-        s2 = offsets[v]
-        d_lim = abs(l1 - l2) + 24
-        max_sc = 0
-        for d in range(-d_lim, d_lim + 1):
-            sc = _score_ungapped_diagonal(seqs_data, s1, l1, s2, l2, d, matrix)
-            if sc > max_sc:
-                max_sc = sc
-                if max_sc >= min_ungapped_score:
-                    keep[p] = True
-                    break
-    return keep
-
-
-@njit(nogil=True, cache=True)
-def _build_mmseqs12_k4_csr(
-    seqs_data: np.ndarray,
-    offsets: np.ndarray,
-    lengths: np.ndarray,
-    lut: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    r"""Build a direct $12^4 = 20,736$-bucket CSR inverted index of `Alphabet.MMSEQS12` 4-mers."""
-    n_buckets = 20736
-    counts = np.zeros(n_buckets + 1, dtype=np.int32)
-    n_seqs = len(lengths)
-    for u in range(n_seqs):
-        seq_len = lengths[u]
-        s = offsets[u]
-        for i in range(seq_len - 3):
-            c0 = lut[seqs_data[s + i]]
-            c1 = lut[seqs_data[s + i + 1]]
-            c2 = lut[seqs_data[s + i + 2]]
-            c3 = lut[seqs_data[s + i + 3]]
-            if c0 < 12 and c1 < 12 and c2 < 12 and c3 < 12:
-                counts[((c0 * 12 + c1) * 12 + c2) * 12 + c3 + 1] += 1
-    indptr = np.zeros(n_buckets + 1, dtype=np.int32)
-    for b in range(n_buckets):
-        indptr[b + 1] = indptr[b] + counts[b + 1]
-    post_seq = np.empty(indptr[n_buckets], dtype=np.int32)
-    post_pos = np.empty(indptr[n_buckets], dtype=np.int16)
-    cur = indptr[:-1].copy()
-    for u in range(n_seqs):
-        seq_len = lengths[u]
-        s = offsets[u]
-        for i in range(seq_len - 3):
-            c0 = lut[seqs_data[s + i]]
-            c1 = lut[seqs_data[s + i + 1]]
-            c2 = lut[seqs_data[s + i + 2]]
-            c3 = lut[seqs_data[s + i + 3]]
-            if c0 < 12 and c1 < 12 and c2 < 12 and c3 < 12:
-                code = ((c0 * 12 + c1) * 12 + c2) * 12 + c3
-                idx = cur[code]
-                post_seq[idx] = u
-                post_pos[idx] = i
-                cur[code] = idx + 1
-    return indptr, post_seq, post_pos
-
-
-@njit(parallel=True, nogil=True, cache=True)
-def _mmseqs12_k4_ungapped_prefilter(
-    seqs_data: np.ndarray,
-    offsets: np.ndarray,
-    lengths: np.ndarray,
-    min_cov: float,
-    min_ungapped_score: int,
-    lut: np.ndarray,
-    matrix: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    r"""MMseqs2-style reduced-alphabet 4-mer CSR + ungapped BLOSUM62 diagonal prefilter."""
-    indptr, post_seq, post_pos = _build_mmseqs12_k4_csr(seqs_data, offsets, lengths, lut)
-    n_seqs = len(lengths)
-    row_counts = np.zeros(n_seqs, dtype=np.int32)
-    for u in prange(n_seqs):  # type: ignore[not-iterable]
-        l1 = lengths[u]
-        s1 = offsets[u]
-        best_sc = np.zeros(n_seqs, dtype=np.int16)
-        last_diag = np.full(n_seqs, 32767, dtype=np.int16)
-        for i in range(l1 - 3):
-            c0 = lut[seqs_data[s1 + i]]
-            c1 = lut[seqs_data[s1 + i + 1]]
-            c2 = lut[seqs_data[s1 + i + 2]]
-            c3 = lut[seqs_data[s1 + i + 3]]
-            if c0 < 12 and c1 < 12 and c2 < 12 and c3 < 12:
-                code = ((c0 * 12 + c1) * 12 + c2) * 12 + c3
-                for idx in range(indptr[code], indptr[code + 1]):
-                    v = post_seq[idx]
-                    if v <= u:
-                        continue
-                    l2 = lengths[v]
-                    if min_cov > 0.0 and min(l1, l2) < min_cov * max(l1, l2):
-                        continue
-                    d = i - int(post_pos[idx])
-                    if d == last_diag[v] or best_sc[v] >= min_ungapped_score:
-                        continue
-                    last_diag[v] = d
-                    sc = _score_ungapped_diagonal(seqs_data, s1, l1, offsets[v], l2, d, matrix)
-                    if sc > best_sc[v]:
-                        best_sc[v] = min(sc, 32760)
-        cnt = 0
-        for v in range(u + 1, n_seqs):
-            if best_sc[v] >= min_ungapped_score:
-                cnt += 1
-        row_counts[u] = cnt
-
-    out_offsets = np.zeros(n_seqs + 1, dtype=np.int32)
-    for u in range(n_seqs):
-        out_offsets[u + 1] = out_offsets[u] + row_counts[u]
-    total_hits = out_offsets[n_seqs]
-    out_q = np.empty(total_hits, dtype=np.int32)
-    out_t = np.empty(total_hits, dtype=np.int32)
-
-    for u in prange(n_seqs):  # type: ignore[not-iterable]
-        if row_counts[u] == 0:
-            continue
-        l1 = lengths[u]
-        s1 = offsets[u]
-        best_sc = np.zeros(n_seqs, dtype=np.int16)
-        last_diag = np.full(n_seqs, 32767, dtype=np.int16)
-        for i in range(l1 - 3):
-            c0 = lut[seqs_data[s1 + i]]
-            c1 = lut[seqs_data[s1 + i + 1]]
-            c2 = lut[seqs_data[s1 + i + 2]]
-            c3 = lut[seqs_data[s1 + i + 3]]
-            if c0 < 12 and c1 < 12 and c2 < 12 and c3 < 12:
-                code = ((c0 * 12 + c1) * 12 + c2) * 12 + c3
-                for idx in range(indptr[code], indptr[code + 1]):
-                    v = post_seq[idx]
-                    if v <= u:
-                        continue
-                    l2 = lengths[v]
-                    if min_cov > 0.0 and min(l1, l2) < min_cov * max(l1, l2):
-                        continue
-                    d = i - int(post_pos[idx])
-                    if d == last_diag[v] or best_sc[v] >= min_ungapped_score:
-                        continue
-                    last_diag[v] = d
-                    sc = _score_ungapped_diagonal(seqs_data, s1, l1, offsets[v], l2, d, matrix)
-                    if sc > best_sc[v]:
-                        best_sc[v] = min(sc, 32760)
-        w = out_offsets[u]
-        for v in range(u + 1, n_seqs):
-            if best_sc[v] >= min_ungapped_score:
-                out_q[w] = u
-                out_t[w] = v
-                w += 1
-    return out_q, out_t
-
-
 @njit(nogil=True, cache=True)
 def _pack_members(
     cluster_ids: np.ndarray,

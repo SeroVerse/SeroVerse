@@ -4,12 +4,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from functools import cache
-from typing import Any, Self, cast, overload
+from typing import Any, Self, cast
 
 import numpy as np
 from numba import njit, prange
 
-from seroverse.core.collections import BatchedContainer, ScalarView
+from seroverse.core.collections import BatchedContainer, ScalarView, UInt32Array
 from seroverse.core.graph.csr import CSR, RelationalCSR
 
 # Constants ------------------------------------------------------------------------------------------------------------
@@ -322,12 +322,12 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
     pan-graph compression, and vectorized SoA array slicing and concatenation.
     """
 
-    node_types: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    node_offsets: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    edge_sources: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    edge_targets: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    edge_types: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    edge_offsets: np.ndarray[tuple[int], np.dtype[np.uint32]]
+    node_types: UInt32Array
+    node_offsets: UInt32Array
+    edge_sources: UInt32Array
+    edge_targets: UInt32Array
+    edge_types: UInt32Array
+    edge_offsets: UInt32Array
 
     def __len__(self) -> int:
         return len(self.node_offsets) - 1
@@ -341,12 +341,12 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
         return len(self.edge_sources)
 
     @property
-    def node_lengths(self) -> np.ndarray[tuple[int], np.dtype[np.uint32]]:
+    def node_lengths(self) -> UInt32Array:
         """Number of nodes in each graph in the batch."""
         return np.diff(self.node_offsets)
 
     @property
-    def edge_lengths(self) -> np.ndarray[tuple[int], np.dtype[np.uint32]]:
+    def edge_lengths(self) -> UInt32Array:
         """Number of edges in each graph in the batch."""
         return np.diff(self.edge_offsets)
 
@@ -382,16 +382,16 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
         )
 
     @classmethod
-    def from_list(cls, graphs: Sequence[Graph]) -> Self:
+    def from_list(cls, items: Sequence[T]) -> Self:
         """Pack a sequence of [`Graph`][seroverse.core.graph.models.Graph] instances into a [`Graphs`][seroverse.core.graph.models.Graphs] batch."""
-        n_graphs = len(graphs)
+        n_graphs = len(items)
         if n_graphs == 0:
             return cls.empty()
 
         node_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
         edge_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
-        tot_nodes = sum(len(g.nodes) for g in graphs)
-        tot_edges = sum(len(g.edges) for g in graphs)
+        tot_nodes = sum(len(g.nodes) for g in items)
+        tot_edges = sum(len(g.edges) for g in items)
 
         node_types = np.empty(tot_nodes, dtype=np.uint32)
         edge_sources = np.empty(tot_edges, dtype=np.uint32)
@@ -400,7 +400,7 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
 
         curr_n = 0
         curr_e = 0
-        for i, g in enumerate(graphs):
+        for i, g in enumerate(items):
             gn = len(g.nodes)
             ge = len(g.edges)
             for j, node in enumerate(g.nodes):
@@ -496,37 +496,23 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
             edge_offsets=edge_offsets,
         )
 
-    @overload
-    def __getitem__(self, item: int | np.integer[Any]) -> T: ...
-
-    @overload
-    def __getitem__(self, item: slice | np.ndarray[tuple[int], Any] | list[Any]) -> S: ...
-
-    @overload
-    def __getitem__(self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]) -> T | S: ...
-
-    def __getitem__(self, item: int | np.integer[Any] | slice | np.ndarray[tuple[int], Any] | list[Any]) -> T | S:
-        """Extract a single [`Graph`][seroverse.core.graph.models.Graph] by integer index, or a sub-batch by slice/mask/indices."""
-        if isinstance(item, (int, np.integer)):
-            idx = int(item)
-            n_graphs = len(self)
-            if idx < 0:
-                idx += n_graphs
-            if idx < 0 or idx >= n_graphs:
-                raise IndexError(f"Graphs index {item} out of bounds for batch of length {n_graphs}.")
-            n_s, n_e = int(self.node_offsets[idx]), int(self.node_offsets[idx + 1])
-            e_s, e_e = int(self.edge_offsets[idx]), int(self.edge_offsets[idx + 1])
-            nodes = tuple(int(x) for x in self.node_types[n_s:n_e])
-            edges = tuple(
-                DirectedEdge(
-                    source=int(self.edge_sources[k]) - n_s,
-                    target=int(self.edge_targets[k]) - n_s,
-                    edge_type=int(self.edge_types[k]),
-                )
-                for k in range(e_s, e_e)
+    def _get_scalar(self, idx: int) -> T:
+        """Materialize the [`Graph`][seroverse.core.graph.models.Graph] at index `idx`."""
+        n_s, n_e = int(self.node_offsets[idx]), int(self.node_offsets[idx + 1])
+        e_s, e_e = int(self.edge_offsets[idx]), int(self.edge_offsets[idx + 1])
+        nodes = tuple(int(x) for x in self.node_types[n_s:n_e])
+        edges = tuple(
+            DirectedEdge(
+                source=int(self.edge_sources[k]) - n_s,
+                target=int(self.edge_targets[k]) - n_s,
+                edge_type=int(self.edge_types[k]),
             )
-            return cast(T, Graph(nodes=nodes, edges=edges))
+            for k in range(e_s, e_e)
+        )
+        return cast(T, Graph(nodes=nodes, edges=edges))
 
+    def _get_slice(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> S:
+        """Slice a sub-batch of graphs by slice, boolean mask, or index array."""
         indices = self._normalize_indices(item)
         if len(indices) == 0:
             return cast(S, self.empty())
