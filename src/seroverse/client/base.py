@@ -1,34 +1,78 @@
-"""Unified asynchronous HTTP client and msgspec serialization helpers for SeroVerse."""
+"""Unified HTTP client powered by `pyreqwest` with transparent async proxy support."""
 
 import asyncio
+import functools
 import hashlib
-import os
+import inspect
 import time
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from io import BytesIO
-from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
-import aiohttp
-import msgspec
+from pyreqwest.client import SyncClient, SyncClientBuilder
+from pyreqwest.exceptions import StatusError
+from pyreqwest.request import SyncRequestBuilder
 
-from seroverse.progress import current_progress
+from seroverse.client.progress import current_progress
+
+
+class AsyncClientProxy[C: "Client"]:
+    """Lightweight asynchronous proxy that dispatches synchronous [`Client`][seroverse.client.base.Client] methods via `asyncio.to_thread`."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: C) -> None:
+        self._client = client
+
+    @property
+    def sync_client(self) -> C:
+        """Return the underlying synchronous [`Client`][seroverse.client.base.Client] instance."""
+        return self._client
+
+    def __repr__(self) -> str:
+        return f"AsyncClientProxy({self._client!r})"
+
+    def __cache_fingerprint__(self) -> tuple[str, str, str]:
+        return self._client.__cache_fingerprint__()
+
+    async def aclose(self) -> None:
+        """Close the underlying synchronous client on a worker thread."""
+        await asyncio.to_thread(self._client.close)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._client, name)
+        if not callable(attr) or inspect.iscoroutinefunction(attr):
+            return attr
+
+        @functools.wraps(attr)
+        async def _async_method(*args: Any, **kwargs: Any) -> Any:
+            return await asyncio.to_thread(attr, *args, **kwargs)
+
+        _async_method.__dict__["__self__"] = self._client
+        return _async_method
 
 
 class Client:
-    """High-performance asynchronous HTTP client powered by `aiohttp` and `msgspec`.
+    """Synchronous HTTP client wrapping [`pyreqwest.client.SyncClient`][pyreqwest.client.SyncClient] with built-in `async with` / `.as_async()` support.
 
-    Args:
-        base_url: Base endpoint URL.
-        api_key_header: Optional HTTP header key for API authorization.
-        api_key: Optional API key string.
-        user_agent: User-Agent header value.
-        timeout: Total request timeout in seconds.
-        max_concurrency: Maximum concurrent in-flight requests per event loop.
-        polite_delay: Optional minimum delay (in seconds) after live network requests.
-        recorder: Optional `cassetter` recorder instance.
+    Write domain methods once as standard synchronous methods; callers can use
+    ``with SomeClient(...) as client:`` for synchronous execution or
+    ``async with SomeClient(...) as client:`` (or ``client.as_async()``) to
+    await any method asynchronously via [`AsyncClientProxy`][seroverse.client.base.AsyncClientProxy].
     """
 
     def __init__(
@@ -41,105 +85,61 @@ class Client:
         *,
         max_concurrency: int = 5,
         polite_delay: float = 0.0,
+        follow_redirects: bool = True,
         recorder: Any | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        clean_base = base_url.rstrip("/")
+        self.base_url: str = clean_base
         self.api_key_header = api_key_header
         self._api_key: str | None = api_key
         self.user_agent = user_agent
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self.timeout = float(timeout)
+        self.follow_redirects = bool(follow_redirects)
         self.max_concurrency = max(1, int(max_concurrency))
         self.polite_delay = float(polite_delay)
         self.recorder = recorder
-        self._session: aiohttp.ClientSession | None = None
-        self._sem: asyncio.Semaphore | None = None
-        self._sem_loop: asyncio.AbstractEventLoop | None = None
+
+        req_headers: dict[str, str] = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+        }
+        if self.api_key_header and self._api_key:
+            req_headers[self.api_key_header] = self._api_key
+        if headers:
+            req_headers.update(headers)
+        self.headers: dict[str, str] = req_headers
+
+        self._http: SyncClient = (
+            SyncClientBuilder()
+            .base_url(f"{clean_base}/")
+            .user_agent(self.user_agent)
+            .default_headers(req_headers)
+            .timeout(timedelta(seconds=self.timeout))
+            .follow_redirects(self.follow_redirects)
+            .max_connections(self.max_concurrency)
+            .pool_max_idle_per_host(self.max_concurrency)
+            .error_for_status(True)
+            .build()
+        )
 
     @property
     def api_key(self) -> str | None:
         """Return the configured API key string, or `None`."""
         return self._api_key
 
-    @staticmethod
-    def encode_msgpack(obj: Any) -> bytes:
-        """Serialize an object or dataclass tree into compact MessagePack bytes."""
-        return msgspec.msgpack.encode(obj)
-
-    @staticmethod
-    def decode_msgpack[T](data: bytes, type_: type[T]) -> T:
-        """Deserialize MessagePack bytes directly into a typed `@dataclass(frozen=True, slots=True)` structure."""
-        return msgspec.msgpack.decode(data, type=type_)
-
-    @staticmethod
-    def save_msgpack(path: Path, obj: Any) -> None:
-        """Atomically persist `obj` to `path` as binary MessagePack."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(msgspec.msgpack.encode(obj))
-        os.replace(tmp, path)
-
-    @staticmethod
-    def load_msgpack[T](path: Path, type_: type[T]) -> T:
-        """Load and decode a binary MessagePack file into `type_`."""
-        return msgspec.msgpack.decode(path.read_bytes(), type=type_)
-
     def __repr__(self) -> str:
         key_repr = "'**********'" if self._api_key else "None"
         return f"{self.__class__.__name__}(base_url='{self.base_url}', api_key={key_repr})"
 
     def __cache_fingerprint__(self) -> tuple[str, str, str]:
-        """Returns a deterministic, credential-safe fingerprint tuple for content-addressable caches."""
+        """Return a deterministic, credential-safe fingerprint tuple for content-addressable caches."""
         key_digest = hashlib.sha256((self._api_key or "").encode("utf-8")).hexdigest()[:16] if self._api_key else ""
         return (type(self).__qualname__, self.base_url, key_digest)
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"User-Agent": self.user_agent, "Accept": "application/json"}
-        if self.api_key_header and self._api_key:
-            headers[self.api_key_header] = self._api_key
-        return headers
-
-    def _get_semaphore(self) -> asyncio.Semaphore:
-        loop = asyncio.get_running_loop()
-        if self._sem is None or self._sem_loop is not loop:
-            self._sem = asyncio.Semaphore(self.max_concurrency)
-            self._sem_loop = loop
-        return self._sem
-
-    async def polite_sleep(self, t_req: float, delay: float | None = None) -> None:
-        """Sleep politely after a live network request, skipping sleep on fast cassette replays."""
-        wait_s = self.polite_delay if delay is None else delay
-        if wait_s <= 0.0:
-            return
-        elapsed = time.perf_counter() - t_req
-        if not (self.recorder is not None and elapsed < 0.25) and elapsed > 0.02:
-            await asyncio.sleep(wait_s)
-
-    async def get_session(self) -> aiohttp.ClientSession:
-        """Retrieve or instantiate the underlying `aiohttp.ClientSession` for the active event loop."""
-        current_loop = asyncio.get_running_loop()
-        if (
-            self._session is None
-            or self._session.closed
-            or getattr(self._session, "_loop", None) is not current_loop
-            or getattr(self._session, "_loop", current_loop).is_closed()
-        ):
-            self._session = aiohttp.ClientSession(
-                headers=self._headers(),
-                timeout=self.timeout,
-            )
-        return self._session
-
-    async def __aenter__(self) -> Self:
-        await self.get_session()
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        await self.close()
+    def close(self) -> None:
+        """Close the underlying `pyreqwest` synchronous client."""
+        self._http.close()
 
     def __enter__(self) -> Self:
         return self
@@ -150,138 +150,185 @@ class Client:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        self.close_sync()
+        self.close()
 
-    async def close(self) -> None:
-        """Close the underlying `aiohttp.ClientSession` if open."""
-        if self._session is not None:
-            if not self._session.closed:
-                loop = getattr(self._session, "_loop", None)
-                if loop is None or not loop.is_closed():
-                    await self._session.close()
-            self._session = None
+    def as_async(self) -> AsyncClientProxy[Self]:
+        """Return an [`AsyncClientProxy`][seroverse.client.base.AsyncClientProxy] wrapping this client."""
+        return AsyncClientProxy(self)
 
-    def close_sync(self) -> None:
-        """Close the underlying `aiohttp.ClientSession` synchronously."""
-        if self._session is not None and not self._session.closed:
-            loop = getattr(self._session, "_loop", None)
-            if loop is not None and not loop.is_closed():
-                self.run_sync(self.close())
+    async def __aenter__(self) -> AsyncClientProxy[Self]:
+        return AsyncClientProxy(self)
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        await asyncio.to_thread(self.close)
+
+    def polite_sleep(self, t_req: float, delay: float | None = None) -> None:
+        """Sleep politely after a live network request, skipping sleep on fast cassette replays."""
+        wait_s = self.polite_delay if delay is None else delay
+        if wait_s <= 0.0:
+            return
+        elapsed = time.perf_counter() - t_req
+        if not (self.recorder is not None and elapsed < 0.25) and elapsed > 0.02:
+            time.sleep(wait_s)
+
+    def _prepare_request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
+        headers: Mapping[str, str] | Sequence[tuple[str, str]] | None = None,
+        json: Any = None,
+        data: Mapping[str, str] | Sequence[tuple[str, str]] | bytes | str | None = None,
+        content: bytes | str | None = None,
+    ) -> SyncRequestBuilder:
+        """Build a configured `SyncRequestBuilder` for `method` and `endpoint`."""
+        target = endpoint if endpoint.startswith(("http://", "https://")) else endpoint.lstrip("/")
+        builder = self._http.request(method.upper(), target).error_for_status(True)
+        if params:
+            builder = builder.query(params)
+        if headers:
+            builder = builder.headers(headers)
+        if json is not None:
+            builder = builder.body_json(json)
+        elif data is not None:
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                builder = builder.body_bytes(bytes(data))
+            elif isinstance(data, str):
+                builder = builder.body_text(data)
             else:
-                self._session = None
+                builder = builder.form(data)
+        elif content is not None:
+            if isinstance(content, str):
+                builder = builder.body_text(content)
+            else:
+                builder = builder.body_bytes(content)
+        return builder
 
-    def _url(self, endpoint: str) -> str:
-        if endpoint.startswith(("http://", "https://")):
-            return endpoint
-        return f"{self.base_url}/{endpoint.lstrip('/')}" if endpoint else self.base_url
+    def request_data(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        allow_404: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """Send an HTTP request, raise on HTTP error status, and return decoded JSON or text (`None` on 404 when `allow_404=True`)."""
+        t_req = time.perf_counter()
+        try:
+            resp = self._prepare_request(method, endpoint, **kwargs).build().send()
+            resp.error_for_status()
+            ctype = (resp.get_header("content-type") or "").lower()
+            if "json" in ctype:
+                return resp.json()
+            return resp.text()
+        except StatusError as exc:
+            if allow_404 and exc.details.get("status") == 404:
+                return None
+            raise
+        finally:
+            self.polite_sleep(t_req)
 
-    async def request(self, method: str, endpoint: str, **kwargs: Any) -> Any:
-        """Send an async HTTP request and return decoded JSON (via `msgspec`) or text."""
-        session = await self.get_session()
-        url = self._url(endpoint)
-        async with self._get_semaphore():
-            t_req = time.perf_counter()
-            try:
-                async with session.request(method, url, **kwargs) as resp:
-                    raw = await resp.read()
-                    if resp.status >= 400:
-                        body = raw.decode("utf-8", errors="replace").strip()
-                        reason = resp.reason or "HTTP Error"
-                        detail = f"{reason}: {body[:300]}" if body else reason
-                        raise aiohttp.ClientResponseError(
-                            resp.request_info,
-                            resp.history,
-                            status=resp.status,
-                            message=detail,
-                            headers=resp.headers,
-                        )
-                    ctype = (resp.content_type or "").lower()
-                    if "json" in ctype:
-                        return msgspec.json.decode(raw)
-                    return raw.decode("utf-8", errors="replace")
-            finally:
-                await self.polite_sleep(t_req)
+    def get_data(self, endpoint: str, *, allow_404: bool = False, **kwargs: Any) -> Any:
+        """Perform an HTTP GET request and return decoded JSON or text."""
+        return self.request_data("GET", endpoint, allow_404=allow_404, **kwargs)
 
-    async def get(self, endpoint: str, **kwargs: Any) -> Any:
-        """Perform an async HTTP GET request."""
-        return await self.request("GET", endpoint, **kwargs)
+    def post_data(self, endpoint: str, *, allow_404: bool = False, **kwargs: Any) -> Any:
+        """Perform an HTTP POST request and return decoded JSON or text."""
+        return self.request_data("POST", endpoint, allow_404=allow_404, **kwargs)
 
-    async def post(self, endpoint: str, **kwargs: Any) -> Any:
-        """Perform an async HTTP POST request."""
-        return await self.request("POST", endpoint, **kwargs)
+    def delete_data(self, endpoint: str, *, allow_404: bool = False, **kwargs: Any) -> Any:
+        """Perform an HTTP DELETE request and return decoded JSON or text."""
+        return self.request_data("DELETE", endpoint, allow_404=allow_404, **kwargs)
 
-    async def delete(self, endpoint: str, **kwargs: Any) -> Any:
-        """Perform an async HTTP DELETE request."""
-        return await self.request("DELETE", endpoint, **kwargs)
+    def stream_bytes(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        allow_404: bool = False,
+        **kwargs: Any,
+    ) -> bytes:
+        """Send an HTTP request, raise on HTTP error status, and return raw response bytes (`b""` on 404 when `allow_404=True`)."""
+        t_req = time.perf_counter()
+        try:
+            resp = self._prepare_request(method, endpoint, **kwargs).build().send()
+            resp.error_for_status()
+            return bytes(resp.bytes())
+        except StatusError as exc:
+            if allow_404 and exc.details.get("status") == 404:
+                return b""
+            raise
+        finally:
+            self.polite_sleep(t_req)
 
-    async def stream_bytes(self, method: str, endpoint: str, **kwargs: Any) -> bytes:
-        """Send an async HTTP request and read raw response bytes."""
-        session = await self.get_session()
-        url = self._url(endpoint)
-        async with self._get_semaphore():
-            t_req = time.perf_counter()
-            try:
-                async with session.request(method, url, **kwargs) as resp:
-                    resp.raise_for_status()
-                    return await resp.read()
-            finally:
-                await self.polite_sleep(t_req)
+    def fetch_external_bytes(self, url: str) -> bytes:
+        """Fetch raw bytes from an external pre-signed URL without attaching this client's API key headers."""
+        if url.startswith(self.base_url):
+            return self.stream_bytes("GET", url)
+        with (
+            SyncClientBuilder()
+            .user_agent(self.user_agent)
+            .default_headers({"Accept": "*/*"})
+            .timeout(timedelta(seconds=self.timeout))
+            .follow_redirects(self.follow_redirects)
+            .error_for_status(True)
+            .build()
+        ) as ext_client:
+            resp = ext_client.get(url).error_for_status(True).build().send()
+            resp.error_for_status()
+            return bytes(resp.bytes())
 
-    async def get_json[T](self, endpoint: str, *, type_: type[T], **kwargs: Any) -> T:
-        """Fetch `endpoint` via GET and decode JSON directly into `type_` using `msgspec`."""
-        raw = await self.stream_bytes("GET", endpoint, **kwargs)
-        return msgspec.json.decode(raw, type=type_)
+    def stream_buffer(self, method: str, endpoint: str, *, allow_404: bool = False, **kwargs: Any) -> BytesIO:
+        """Send an HTTP request and return an in-memory `BytesIO` stream."""
+        return BytesIO(self.stream_bytes(method, endpoint, allow_404=allow_404, **kwargs))
 
-    async def post_json[T](self, endpoint: str, *, type_: type[T], **kwargs: Any) -> T:
-        """Fetch `endpoint` via POST and decode JSON directly into `type_` using `msgspec`."""
-        raw = await self.stream_bytes("POST", endpoint, **kwargs)
-        return msgspec.json.decode(raw, type=type_)
-
-    async def stream_buffer(self, method: str, endpoint: str, **kwargs: Any) -> BytesIO:
-        """Send an async HTTP request and return an in-memory `BytesIO` stream."""
-        b = await self.stream_bytes(method, endpoint, **kwargs)
-        return BytesIO(b)
-
-    async def stream_chunks(
+    def stream_chunks(
         self,
         method: str,
         endpoint: str,
         chunk_size: int = 65536,
+        *,
+        allow_404: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[bytes]:
-        """Stream response bytes in chunks as an async generator, emitting progress when `Content-Length` is known."""
-        session = await self.get_session()
-        url = self._url(endpoint)
+    ) -> Iterator[bytes]:
+        """Stream response bytes in chunks, emitting progress when `Content-Length` is known."""
         prog = current_progress()
-        async with session.request(method, url, **kwargs) as resp:
-            resp.raise_for_status()
-            total_bytes = resp.content_length if resp.content_length and resp.content_length > 0 else None
-            received = 0
-            async for chunk in resp.content.iter_chunked(chunk_size):
-                received += len(chunk)
-                if total_bytes is not None and prog.is_active:
-                    prog.report(
-                        min(1.0, received / total_bytes),
-                        detail=f"Streaming {endpoint} ({received:,} / {total_bytes:,} B)",
-                    )
-                yield chunk
-
-    def run_sync[T](self, coro: Coroutine[Any, Any, T]) -> T:
-        """Execute a coroutine synchronously and close any session bound to the temporary event loop."""
-
-        async def _runner() -> T:
-            try:
-                return await coro
-            finally:
-                await self.close()
-
+        req = self._prepare_request(method, endpoint, **kwargs).build_streamed()
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
+            with req as resp:
+                resp.error_for_status()
+                raw_len = resp.get_header("content-length")
+                total_bytes = int(raw_len) if raw_len and raw_len.isdigit() and int(raw_len) > 0 else None
+                received = 0
+                reader = resp.body_reader
+                while (chunk := reader.read(chunk_size)) is not None:
+                    raw_chunk = bytes(chunk)
+                    if not raw_chunk:
+                        break
+                    received += len(raw_chunk)
+                    if total_bytes is not None and prog.is_active:
+                        prog.report(
+                            min(1.0, received / total_bytes),
+                            detail=f"Streaming {endpoint} ({received:,} / {total_bytes:,} B)",
+                        )
+                    yield raw_chunk
+        except StatusError as exc:
+            if allow_404 and exc.details.get("status") == 404:
+                return
+            raise
 
-        if loop and loop.is_running():
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(lambda: asyncio.run(_runner()))
-                return future.result()
-        return asyncio.run(_runner())
+    def map_concurrent[T, R](self, fn: Callable[[T], R], items: Iterable[T]) -> list[R]:
+        """Execute `fn` concurrently across `items` using a thread pool bounded by `max_concurrency`."""
+        item_list = list(items)
+        if not item_list:
+            return []
+        if len(item_list) == 1 or self.max_concurrency <= 1:
+            return [fn(x) for x in item_list]
+        with ThreadPoolExecutor(max_workers=min(self.max_concurrency, len(item_list))) as pool:
+            return list(pool.map(fn, item_list))

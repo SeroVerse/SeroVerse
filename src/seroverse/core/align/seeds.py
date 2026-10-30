@@ -40,7 +40,7 @@ class Seed(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class Seeds(BatchedContainer[Seed, "Seeds"]):
+class Seeds(BatchedContainer[Seed]):
     r"""Structure-of-Arrays (SoA) batch container for alignment seeds and chaining anchors.
 
     Unifies aggregated pair-level seeds (1 consensus diagonal per `(query, target)` pair)

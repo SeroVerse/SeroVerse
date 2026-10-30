@@ -843,8 +843,7 @@ class RelationalCSR(CSR):
 
     For each target vertex $v \in [0, N-1]$, the slice `k in range(indptr[v], indptr[v + 1])`
     enumerates incoming directed edges $(u_k \xrightarrow{r_k} v)$ with source vertex
-    `u_k = indices[k]` (also aliased as `.src_indices`), relation ID `r_k = rel_types[k]`,
-    and normalized aggregation weight `data[k]` (also aliased as `.edge_weights`).
+    `u_k = indices[k]`, relation ID `r_k = rel_types[k]`, and normalized aggregation weight `data[k]`.
 
     Attributes:
         indptr: 1D `int32` array of shape `(N + 1,)` indexing incoming edges per target vertex.
@@ -874,16 +873,6 @@ class RelationalCSR(CSR):
     def n_nodes(self) -> int:
         r"""Total number of vertices $N$ (including any virtual pool vertices)."""
         return self.shape[0]
-
-    @property
-    def src_indices(self) -> np.ndarray[tuple[int], np.dtype[np.int32]]:
-        r"""1D `int32` array of incoming source vertex indices (alias for `self.indices`)."""
-        return self.indices
-
-    @property
-    def edge_weights(self) -> np.ndarray[tuple[int], np.dtype[np.float32]]:
-        r"""1D `float32` array of per-edge aggregation weights (alias for `self.data`)."""
-        return self.data
 
     @classmethod
     def from_edges(
@@ -1070,7 +1059,7 @@ class RelationalCSR(CSR):
     @classmethod
     def from_batch(
         cls,
-        batch: Graphs[Any, Any],
+        batch: Graphs[Any],
         edge_orientations: Sequence[int] | np.ndarray | None = None,
         *,
         include_2hop: bool = True,

@@ -414,6 +414,6 @@ def test_scalar_view_and_batched_container_contracts() -> None:
     with pytest.raises(TypeError, match="must be annotated as a 1D NumPy array"):
 
         @dataclass(frozen=True, slots=True)
-        class _InvalidContainer(BatchedContainer[Seed, "_InvalidContainer"]):
+        class _InvalidContainer(BatchedContainer[Seed]):
             xs: Int32Array
             bad_scalar: int

@@ -12,7 +12,7 @@ from seroverse.core.io.fasta import FastaReader
 
 def test_fasta_reader_stream_and_load_consistency(assembly_path: Path) -> None:
     """Streaming iteration and batch `load()` over real genome assemblies must produce identical sequences."""
-    with zstd.open(assembly_path, mode="rb") as handle, FastaReader(handle, chunk_size=64 * 1024) as reader:
+    with FastaReader.from_file(assembly_path, chunk_size=64 * 1024) as reader:
         streamed = list(reader)
 
     with zstd.open(assembly_path, mode="rb") as handle, FastaReader(handle) as reader:
@@ -25,6 +25,14 @@ def test_fasta_reader_stream_and_load_consistency(assembly_path: Path) -> None:
         assert rec.id == batch.ids[i]
         assert len(rec.seq) == int(batch.lengths[i])
         assert rec.seq == batch[i].seq
+
+
+def test_fasta_reader_from_file_unsupported_extension(tmp_path: Path) -> None:
+    """Unsupported file extensions must raise `NotImplementedError`."""
+    bad_file = tmp_path / "invalid.txt"
+    bad_file.write_bytes(b">seq1\nACGT\n")
+    with pytest.raises(NotImplementedError, match="Unsupported format"):
+        FastaReader.from_file(bad_file)
 
 
 def test_fasta_reader_stateful_next_and_small_chunks() -> None:

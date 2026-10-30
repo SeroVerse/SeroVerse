@@ -56,8 +56,6 @@ class ProgressReporter:
         """Whether an active listener callback is bound to this reporter."""
         return self._shared.callback is not None
 
-    active = is_active
-
     def report(
         self,
         fraction: float,
@@ -193,11 +191,3 @@ def progress_context(
         yield reporter
     finally:
         _ACTIVE_PROGRESS.reset(token)
-
-
-__all__ = [
-    "ProgressCallback",
-    "ProgressReporter",
-    "current_progress",
-    "progress_context",
-]

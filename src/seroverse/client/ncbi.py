@@ -1,19 +1,16 @@
 """NCBI Entrez E-Utilities and NCBI Datasets v2 REST API client and models."""
 
-from __future__ import annotations
-
-import asyncio
 import io
 import os
+import threading
+import urllib.parse
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import msgspec
-
 from seroverse.client.base import Client
-from seroverse.progress import current_progress
+from seroverse.client.progress import current_progress
 
 NCBI_EUTILS_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 NCBI_DATASETS_URL = "https://api.ncbi.nlm.nih.gov/datasets/v2"
@@ -77,19 +74,8 @@ class DatasetAssemblyReport:
     paired_accession: str = ""
 
 
-@dataclass(frozen=True, slots=True)
-class _ESearchResultInner:
-    idlist: tuple[str, ...] = ()
-    count: str = "0"
-
-
-@dataclass(frozen=True, slots=True)
-class _ESearchEnvelope:
-    esearchresult: _ESearchResultInner | None = None
-
-
 class NCBIClient(Client):
-    """Asynchronous client for NCBI Entrez E-Utilities and NCBI Datasets v2."""
+    """Client for NCBI Entrez E-Utilities and NCBI Datasets v2."""
 
     def __init__(
         self,
@@ -120,18 +106,19 @@ class NCBIClient(Client):
         base.update(extra)
         return base
 
-    async def esearch(self, db: str, term: str, retmax: int = 100) -> list[str]:
+    def esearch(self, db: str, term: str, retmax: int = 100) -> list[str]:
         """Run rate-limited `esearch.fcgi` and return matching UID strings."""
-        try:
-            params = self._eutils_params({"db": db, "term": term, "retmax": str(retmax)})
-            env = await self.get_json("esearch.fcgi", type_=_ESearchEnvelope, params=params)
-            if env.esearchresult and env.esearchresult.idlist:
-                return [str(u) for u in env.esearchresult.idlist]
-        except Exception:
-            pass
+        params = self._eutils_params({"db": db, "term": term, "retmax": str(retmax)})
+        payload = self.get_data("esearch.fcgi", params=params, allow_404=True)
+        if (
+            isinstance(payload, dict)
+            and isinstance(res := payload.get("esearchresult"), dict)
+            and isinstance(idlist := res.get("idlist"), list)
+        ):
+            return [str(u) for u in idlist]
         return []
 
-    async def esummary(self, db: str, uids: Sequence[str], chunk_size: int = 200) -> dict[str, dict[str, Any]]:
+    def esummary(self, db: str, uids: Sequence[str], chunk_size: int = 200) -> dict[str, dict[str, Any]]:
         """Run batched `esummary.fcgi` POST requests and return `{uid: info_dict}`."""
         out: dict[str, dict[str, Any]] = {}
         chunks = [uids[i : i + chunk_size] for i in range(0, len(uids), chunk_size)]
@@ -140,28 +127,29 @@ class NCBIClient(Client):
         prog = current_progress()
         completed = 0
         total = len(chunks)
+        lock = threading.Lock()
 
-        async def _fetch_chunk(chunk: Sequence[str]) -> None:
+        def _fetch_chunk(chunk: Sequence[str]) -> None:
             nonlocal completed
             try:
                 data = self._eutils_params({"db": db, "id": ",".join(chunk)})
-                raw = await self.stream_bytes("POST", "esummary.fcgi", data=data)
-                payload = msgspec.json.decode(raw)
+                payload = self.post_data("esummary.fcgi", data=data, allow_404=True)
                 if isinstance(payload, dict) and isinstance(res := payload.get("result"), dict):
-                    for u in chunk:
-                        if isinstance(info := res.get(u), dict):
-                            out[u] = info
-            except Exception:
-                pass
+                    with lock:
+                        for u in chunk:
+                            if isinstance(info := res.get(u), dict):
+                                out[u] = info
             finally:
-                completed += 1
+                with lock:
+                    completed += 1
+                    done = completed
                 if prog.is_active:
-                    prog.report(completed / total, detail=f"NCBI esummary ({db}): batch {completed}/{total}")
+                    prog.report(done / total, detail=f"NCBI esummary ({db}): batch {done}/{total}")
 
-        await asyncio.gather(*[_fetch_chunk(c) for c in chunks])
+        self.map_concurrent(_fetch_chunk, chunks)
         return out
 
-    async def fetch_nuccore_summaries(
+    def fetch_nuccore_summaries(
         self,
         uids: Sequence[str],
         *,
@@ -169,7 +157,7 @@ class NCBIClient(Client):
         chunk_size: int = 200,
     ) -> dict[str, NuccoreSummary]:
         """Fetch `NuccoreSummary` records for `uids`, optionally filtering by sequence length `slen_range`."""
-        raw_map = await self.esummary("nuccore", uids, chunk_size=chunk_size)
+        raw_map = self.esummary("nuccore", uids, chunk_size=chunk_size)
         summaries: dict[str, NuccoreSummary] = {}
         for u, info in raw_map.items():
             slen = int(info.get("slen") or 0)
@@ -187,12 +175,10 @@ class NCBIClient(Client):
                 )
         return summaries
 
-    async def fetch_pubmed_summaries(
-        self, pmids: Sequence[int | str], chunk_size: int = 150
-    ) -> dict[int, PubMedSummary]:
+    def fetch_pubmed_summaries(self, pmids: Sequence[int | str], chunk_size: int = 150) -> dict[int, PubMedSummary]:
         """Fetch `PubMedSummary` records (including DOIs) for `pmids`."""
         uid_strs = [str(p) for p in pmids]
-        raw_map = await self.esummary("pubmed", uid_strs, chunk_size=chunk_size)
+        raw_map = self.esummary("pubmed", uid_strs, chunk_size=chunk_size)
         out: dict[int, PubMedSummary] = {}
         for u_s, info in raw_map.items():
             if not u_s.isdigit():
@@ -215,7 +201,7 @@ class NCBIClient(Client):
             )
         return out
 
-    async def elink_pubmed_to_nuccore(self, pmids: Sequence[int], batch_size: int = 40) -> dict[int, list[str]]:
+    def elink_pubmed_to_nuccore(self, pmids: Sequence[int], batch_size: int = 40) -> dict[int, list[str]]:
         """Map PubMed IDs to linked `nuccore` UIDs via `elink.fcgi` (`pubmed_nuccore`)."""
         out: dict[int, list[str]] = {}
         batches = [pmids[i : i + batch_size] for i in range(0, len(pmids), batch_size)]
@@ -235,8 +221,7 @@ class NCBIClient(Client):
                     params.append(("api_key", self.api_key))
                 for p in batch:
                     params.append(("id", str(p)))
-                raw = await self.stream_bytes("GET", "elink.fcgi", params=params)
-                payload = msgspec.json.decode(raw)
+                payload = self.get_data("elink.fcgi", params=params, allow_404=True)
                 if not isinstance(payload, dict):
                     continue
                 for lset in payload.get("linksets") or ():
@@ -252,36 +237,37 @@ class NCBIClient(Client):
                             uids.extend(str(x) for x in (ldb.get("links") or ()))
                     if uids:
                         out[pmid] = uids
-            except Exception:
-                pass
             finally:
                 if prog.is_active:
                     prog.report(idx / total, detail=f"NCBI elink: batch {idx}/{total}")
         return out
 
-    async def efetch_fasta(self, uids: Sequence[str], db: str = "nuccore") -> bytes:
-        """Download multi-FASTA bytes for `uids` via `efetch.fcgi`."""
+    def _efetch_text(self, uids: Sequence[str], db: str, rettype: str) -> bytes:
         if not uids:
             return b""
-        try:
-            params = {"db": db, "id": ",".join(uids), "rettype": "fasta", "retmode": "text"}
-            if self.api_key:
-                params["api_key"] = self.api_key
-            return await self.stream_bytes("GET", "efetch.fcgi", params=params)
-        except Exception:
-            return b""
+        params = {"db": db, "id": ",".join(uids), "rettype": rettype, "retmode": "text"}
+        if self.api_key:
+            params["api_key"] = self.api_key
+        return self.stream_bytes("GET", "efetch.fcgi", params=params, allow_404=True)
 
-    async def fetch_taxon_assemblies(self, taxon: str, page_size: int = 1000) -> list[DatasetAssemblyReport]:
+    def efetch_fasta(self, uids: Sequence[str], db: str = "nuccore") -> bytes:
+        """Download multi-FASTA bytes for `uids` via `efetch.fcgi`."""
+        return self._efetch_text(uids, db, "fasta")
+
+    def efetch_genbank(
+        self,
+        uids: Sequence[str],
+        db: str = "nuccore",
+        rettype: str = "gbwithparts",
+    ) -> bytes:
+        """Download GenBank flat-file bytes (`gbwithparts` or `gb`) for `uids` via `efetch.fcgi`."""
+        return self._efetch_text(uids, db, rettype)
+
+    def fetch_taxon_assemblies(self, taxon: str, page_size: int = 1000) -> list[DatasetAssemblyReport]:
         """Query NCBI Datasets v2 `genome/taxon/{taxon}/dataset_report` and return assembly reports."""
-        import urllib.parse
-
         encoded = urllib.parse.quote(taxon)
         url = f"{NCBI_DATASETS_URL}/genome/taxon/{encoded}/dataset_report"
-        try:
-            raw = await self.stream_bytes("GET", url, params={"page_size": str(page_size)})
-            payload = msgspec.json.decode(raw)
-        except Exception:
-            return []
+        payload = self.get_data(url, params={"page_size": str(page_size)}, allow_404=True)
         if not isinstance(payload, dict):
             return []
         reports: list[DatasetAssemblyReport] = []
@@ -315,15 +301,19 @@ class NCBIClient(Client):
             )
         return reports
 
-    async def download_assembly_fasta(self, accession: str) -> bytes:
+    def download_assembly_fasta(self, accession: str) -> bytes:
         """Download genome FASTA bytes for `accession` via NCBI Datasets v2 archive endpoint."""
         url = f"{NCBI_DATASETS_URL}/genome/accession/{accession}/download"
-        try:
-            zip_bytes = await self.stream_bytes("GET", url, params={"include_annotation_type": "GENOME_FASTA"})
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                fna_chunks = [
-                    zf.read(zi.filename) for zi in zf.infolist() if zi.filename.endswith((".fna", ".fasta", ".fa"))
-                ]
-                return b"\n".join(fna_chunks)
-        except Exception:
+        zip_bytes = self.stream_bytes(
+            "GET",
+            url,
+            params={"include_annotation_type": "GENOME_FASTA"},
+            allow_404=True,
+        )
+        if not zip_bytes:
             return b""
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            fna_chunks = [
+                zf.read(zi.filename) for zi in zf.infolist() if zi.filename.endswith((".fna", ".fasta", ".fa"))
+            ]
+            return b"\n".join(fna_chunks)

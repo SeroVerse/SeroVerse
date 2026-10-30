@@ -195,7 +195,7 @@ class CostStrategy(ABC):
 
 @dataclass(frozen=True, slots=True)
 class ExactMatchCostStrategy(CostStrategy):
-    """Isomorphic cost model: 0.0 for identical node types, infinite penalty for mismatches."""
+    """Isomorphic cost model: 0.0 for identical node types, `penalty` for mismatches."""
 
     def compute_cost(
         self,
@@ -208,7 +208,7 @@ class ExactMatchCostStrategy(CostStrategy):
         """Compute exact equality cost matrix using vectorized broadcasting."""
         if len(labels_a) == 0 or len(labels_b) == 0:
             return np.empty((len(labels_a), len(labels_b)), dtype=np.float64)
-        return np.where(labels_a[:, None] == labels_b[None, :], 0.0, np.inf)
+        return np.where(labels_a[:, None] == labels_b[None, :], 0.0, float(penalty))
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +249,7 @@ class GraphAligner:
     """Configurable bipartite graph alignment solver using Hungarian assignment."""
 
     cost_strategy: CostStrategy = ExactMatchCostStrategy()
-    embedding_strategy: EmbeddingStrategy = WeisfeilerLehmanEmbedding()
+    embedding_strategy: EmbeddingStrategy | None = None
     config: AlignmentConfig = AlignmentConfig.default()
 
     def align(self, graph_a: Graph, graph_b: Graph) -> Alignment:
@@ -281,8 +281,13 @@ class GraphAligner:
         deg_a = np.asarray(adj_a.sum(axis=1), dtype=np.float64).ravel()[:, None]
         deg_b = np.asarray(adj_b.sum(axis=1), dtype=np.float64).ravel()[:, None]
 
-        emb_a = self.embedding_strategy.compute(adj_a, deg_a)
-        emb_b = self.embedding_strategy.compute(adj_b, deg_b)
+        emb_strategy = (
+            self.embedding_strategy
+            if self.embedding_strategy is not None
+            else WeisfeilerLehmanEmbedding(iterations=self.config.iterations)
+        )
+        emb_a = emb_strategy.compute(adj_a, deg_a)
+        emb_b = emb_strategy.compute(adj_b, deg_b)
 
         c_topo = np.linalg.norm(emb_a[:, None, :] - emb_b[None, :, :], axis=2) * self.config.topo_weight
 

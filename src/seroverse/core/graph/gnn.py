@@ -373,7 +373,7 @@ class RelationalMPNN:
         self._v_b_echan = np.zeros_like(self.b_edge_chan_)
 
     @staticmethod
-    def _coerce_csr(csr: RelationalCSR | Graph | Graphs[Any, Any]) -> RelationalCSR:
+    def _coerce_csr(csr: RelationalCSR | Graph | Graphs[Any]) -> RelationalCSR:
         """Coerce a `Graph` or `Graphs` into a `RelationalCSR` if needed."""
         if isinstance(csr, RelationalCSR):
             return csr
@@ -414,7 +414,7 @@ class RelationalMPNN:
     def encode(
         self,
         x: np.ndarray,
-        csr: RelationalCSR | Graph | Graphs[Any, Any],
+        csr: RelationalCSR | Graph | Graphs[Any],
         *,
         clamped_mask: np.ndarray | None = None,
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float32]]:
@@ -427,9 +427,9 @@ class RelationalMPNN:
             h, _, _ = _mpnn_layer_forward(
                 h,
                 rel_csr.indptr,
-                rel_csr.src_indices,
+                rel_csr.indices,
                 rel_csr.rel_types,
-                rel_csr.edge_weights,
+                rel_csr.data,
                 self.w_rel_[lay],
                 self.b_rel_[lay],
                 c_mask,
@@ -440,7 +440,7 @@ class RelationalMPNN:
     def predict_node_logits(
         self,
         x: np.ndarray,
-        csr: RelationalCSR | Graph | Graphs[Any, Any],
+        csr: RelationalCSR | Graph | Graphs[Any],
         *,
         clamped_mask: np.ndarray | None = None,
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float32]]:
@@ -451,7 +451,7 @@ class RelationalMPNN:
     def predict_node_proba(
         self,
         x: np.ndarray,
-        csr: RelationalCSR | Graph | Graphs[Any, Any],
+        csr: RelationalCSR | Graph | Graphs[Any],
         *,
         clamped_mask: np.ndarray | None = None,
     ) -> np.ndarray[tuple[int, int], np.dtype[np.float32]]:
@@ -483,7 +483,7 @@ class RelationalMPNN:
     def fit_step(
         self,
         x: np.ndarray,
-        csr: RelationalCSR | Graph | Graphs[Any, Any],
+        csr: RelationalCSR | Graph | Graphs[Any],
         *,
         node_targets: np.ndarray | None = None,
         node_weights: np.ndarray | None = None,
@@ -528,9 +528,9 @@ class RelationalMPNN:
             h_curr, pn, ri = _mpnn_layer_forward(
                 h_curr,
                 rel_csr.indptr,
-                rel_csr.src_indices,
+                rel_csr.indices,
                 rel_csr.rel_types,
-                rel_csr.edge_weights,
+                rel_csr.data,
                 self.w_rel_[lay],
                 self.b_rel_[lay],
                 c_mask,
@@ -654,9 +654,9 @@ class RelationalMPNN:
                 pre_norms[lay],
                 rms_invs[lay],
                 rel_csr.indptr,
-                rel_csr.src_indices,
+                rel_csr.indices,
                 rel_csr.rel_types,
-                rel_csr.edge_weights,
+                rel_csr.data,
                 self.w_rel_[lay],
                 c_mask,
             )

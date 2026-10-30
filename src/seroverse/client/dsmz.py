@@ -1,32 +1,17 @@
 """DSMZ StrainInfo v2 and BacDive v2 REST API clients and culture-collection models."""
 
-from __future__ import annotations
-
-import asyncio
 import os
+import threading
 import urllib.parse
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import msgspec
-
 from seroverse.client.base import Client
-from seroverse.progress import current_progress
+from seroverse.client.progress import current_progress
 
 STRAININFO_V2_URL = "https://api.straininfo.dsmz.de/v2"
 BACDIVE_V2_URL = "https://api.bacdive.dsmz.de/v2"
-
-
-@dataclass(frozen=True, slots=True)
-class StrainLiterature:
-    """Immutable bibliographic entry linked to a StrainInfo culture deposit."""
-
-    id: int = 0
-    pubmed: int = 0
-    doi: str = ""
-    title: str = ""
-    year: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +103,7 @@ class StrainPassport:
 
 
 class StrainInfoClient(Client):
-    """Asynchronous client for the public DSMZ StrainInfo v2 REST API."""
+    """Client for the public DSMZ StrainInfo v2 REST API."""
 
     def __init__(
         self,
@@ -137,30 +122,29 @@ class StrainInfoClient(Client):
             recorder=recorder,
         )
 
-    async def _search_ids(self, path: str) -> list[int]:
-        try:
-            raw_ids = await self.get_json(path, type_=list[int])
+    def _search_ids(self, path: str) -> list[int]:
+        raw_ids = self.get_data(path, allow_404=True)
+        if isinstance(raw_ids, list):
             return [int(x) for x in raw_ids if int(x) > 0]
-        except Exception:
-            return []
+        return []
 
-    async def search_by_taxon(self, taxon_name: str) -> list[int]:
+    def search_by_taxon(self, taxon_name: str) -> list[int]:
         """Return all StrainInfo IDs (`SI-ID`s) for a species or genus name."""
-        return await self._search_ids(f"search/strain/tax_name/{urllib.parse.quote(taxon_name.strip())}")
+        return self._search_ids(f"search/strain/tax_name/{urllib.parse.quote(taxon_name.strip())}")
 
-    async def search_by_cc_no(self, cc_no: str) -> list[int]:
+    def search_by_cc_no(self, cc_no: str) -> list[int]:
         """Return matching `SI-ID`s for a culture collection number (e.g. `ATCC 25238`, `NCTC 9001`)."""
-        return await self._search_ids(f"search/strain/cc_no/{urllib.parse.quote(cc_no.strip())}")
+        return self._search_ids(f"search/strain/cc_no/{urllib.parse.quote(cc_no.strip())}")
 
-    async def search_by_designation(self, designation: str) -> list[int]:
+    def search_by_designation(self, designation: str) -> list[int]:
         """Return matching `SI-ID`s for an arbitrary strain designation (e.g. `Prague 1550/57`)."""
-        return await self._search_ids(f"search/strain/des/{urllib.parse.quote(designation.strip())}")
+        return self._search_ids(f"search/strain/des/{urllib.parse.quote(designation.strip())}")
 
-    async def search_by_collection(self, collection_code: str) -> list[int]:
+    def search_by_collection(self, collection_code: str) -> list[int]:
         """Return all `SI-ID`s deposited in a culture collection (e.g. `CNCTC`, `NCTC`, `ATCC`)."""
-        return await self._search_ids(f"search/strain/cc/{urllib.parse.quote(collection_code.strip())}")
+        return self._search_ids(f"search/strain/cc/{urllib.parse.quote(collection_code.strip())}")
 
-    async def fetch_passports(self, si_ids: Sequence[int], batch_size: int = 50) -> list[StrainPassport]:
+    def fetch_passports(self, si_ids: Sequence[int], batch_size: int = 50) -> list[StrainPassport]:
         """Batch-fetch `StrainPassport` records for `si_ids` via `/v2/data/strain/max/{ids}`."""
         unique_ids = list(dict.fromkeys(int(x) for x in si_ids if int(x) > 0))
         if not unique_ids:
@@ -170,39 +154,39 @@ class StrainInfoClient(Client):
         prog = current_progress()
         completed = 0
         total = len(chunks)
+        lock = threading.Lock()
 
-        async def _fetch_chunk(chunk: Sequence[int]) -> list[StrainPassport]:
+        def _fetch_chunk(chunk: Sequence[int]) -> list[StrainPassport]:
             nonlocal completed
             joined = ",".join(str(x) for x in chunk)
             try:
-                raw = await self.stream_bytes("GET", f"data/strain/max/{joined}")
-                items = msgspec.json.decode(raw)
+                items = self.get_data(f"data/strain/max/{joined}", allow_404=True)
                 if isinstance(items, list):
                     return [
                         p
                         for item in items
                         if isinstance(item, dict) and (p := StrainPassport.from_raw_dict(item)) is not None
                     ]
-            except Exception:
-                pass
             finally:
-                completed += 1
+                with lock:
+                    completed += 1
+                    done = completed
                 if prog.is_active:
-                    prog.report(completed / total, detail=f"StrainInfo passports: batch {completed}/{total}")
+                    prog.report(done / total, detail=f"StrainInfo passports: batch {done}/{total}")
             return []
 
-        for res in await asyncio.gather(*[_fetch_chunk(c) for c in chunks]):
+        for res in self.map_concurrent(_fetch_chunk, chunks):
             passports.extend(res)
         return passports
 
-    async def fetch_taxon_passports(self, taxon_name: str, batch_size: int = 50) -> list[StrainPassport]:
+    def fetch_taxon_passports(self, taxon_name: str, batch_size: int = 50) -> list[StrainPassport]:
         """Search all strains for `taxon_name` and batch-fetch their complete `StrainPassport` records."""
-        si_ids = await self.search_by_taxon(taxon_name)
-        return await self.fetch_passports(si_ids, batch_size=batch_size)
+        si_ids = self.search_by_taxon(taxon_name)
+        return self.fetch_passports(si_ids, batch_size=batch_size)
 
 
 class BacDiveClient(Client):
-    """Asynchronous client for the DSMZ BacDive v2 REST API."""
+    """Client for the DSMZ BacDive v2 REST API."""
 
     def __init__(
         self,
@@ -225,10 +209,7 @@ class BacDiveClient(Client):
             recorder=recorder,
         )
 
-    async def fetch_strain(self, bacdive_id: int) -> dict[str, Any]:
+    def fetch_strain(self, bacdive_id: int) -> dict[str, Any]:
         """Fetch a BacDive strain record by its integer `bacdive_id`."""
-        try:
-            res = await self.get(f"fetch/{int(bacdive_id)}")
-            return res if isinstance(res, dict) else {}
-        except Exception:
-            return {}
+        res = self.get_data(f"fetch/{int(bacdive_id)}", allow_404=True)
+        return res if isinstance(res, dict) else {}

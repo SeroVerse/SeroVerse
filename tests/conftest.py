@@ -1,10 +1,8 @@
-"""Shared pytest fixtures for SeroGen genome assemblies and predictors."""
+"""Shared pytest fixtures for SeroVerse genome assembly FASTA paths."""
 
 from pathlib import Path
 
 import pytest
-
-from seroverse.core.genome import GenomeAssembly
 
 DATA_DIR: Path = Path(__file__).resolve().parent / "data"
 
@@ -39,35 +37,3 @@ def assembly_path(request: pytest.FixtureRequest) -> Path:
     """Parametrized fixture yielding each test genome assembly file path."""
     path: Path = request.getfixturevalue(request.param)
     return path
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-# Parsed GenomeAssembly Fixtures (Derived from Path Fixtures)
-# ----------------------------------------------------------------------------------------------------------------------
-@pytest.fixture(scope="session")
-def pao1_assembly(pao1_path: Path) -> GenomeAssembly:
-    """Parsed `GenomeAssembly` instance for *P. aeruginosa* PAO1."""
-    return GenomeAssembly.from_file(pao1_path)
-
-
-@pytest.fixture(scope="session")
-def sgh10_assembly(sgh10_path: Path) -> GenomeAssembly:
-    """Parsed `GenomeAssembly` instance for *K. pneumoniae* SGH10 chromosome."""
-    return GenomeAssembly.from_file(sgh10_path)
-
-
-@pytest.fixture(scope="session")
-def stmc125_assembly(stmc125_path: Path) -> GenomeAssembly:
-    """Parsed `GenomeAssembly` instance for *S. enterica* STMC125."""
-    return GenomeAssembly.from_file(stmc125_path)
-
-
-@pytest.fixture(
-    scope="session",
-    params=("pao1_assembly", "sgh10_assembly", "stmc125_assembly"),
-    ids=("PAO1", "SGH10_chromosome", "STMC125"),
-)
-def genome_assembly(request: pytest.FixtureRequest) -> GenomeAssembly:
-    """Parametrized fixture yielding each parsed `GenomeAssembly` instance."""
-    assembly: GenomeAssembly = request.getfixturevalue(request.param)
-    return assembly

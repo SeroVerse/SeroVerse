@@ -9,8 +9,6 @@ collinear anchor chaining system inspired by `minimap2` (Li, 2018):
   piecewise WFA2 + adaptive block X-drop base-alignment engine.
 """
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from typing import ClassVar
@@ -20,15 +18,7 @@ from numba import njit, prange
 
 from seroverse.core.align.pairwise import PairwiseAligner, PairwiseAlignments
 from seroverse.core.align.seeds import Seeds
-from seroverse.core.collections import (
-    BoolArray,
-    Int32Array,
-    RaggedArrayContainer,
-    ScalarView,
-    UInt16Array,
-    UInt32Array,
-    lengths_to_offsets,
-)
+from seroverse.core.collections import BoolArray, Int32Array, RaggedArrayContainer, ScalarView, UInt16Array, UInt32Array
 from seroverse.core.seq.kmers import BaseKmerIndex
 from seroverse.core.seq.seq import Sequences
 
@@ -69,11 +59,6 @@ class Chain(ScalarView):
         return len(self.q_pos)
 
     @property
-    def n_anchors(self) -> int:
-        r"""Return the number of anchors in this chain."""
-        return len(self.q_pos)
-
-    @property
     def offset(self) -> int:
         r"""Return the initial diagonal offset `q_start - t_start` of this chain."""
         return int(self.q_start - self.t_start)
@@ -94,7 +79,7 @@ class Chain(ScalarView):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Chains(RaggedArrayContainer[Chain, "Chains"]):
+class Chains(RaggedArrayContainer[Chain]):
     r"""Ragged Structure-of-Arrays (SoA) batch container for collinear anchor chains.
 
     Stores per-chain summary arrays (`query_indices`, `target_indices`, `scores`, `q_starts`,
@@ -263,8 +248,8 @@ class Chainer:
         if total_chains == 0:
             return Chains.empty()
 
-        chain_indptr = lengths_to_offsets(pair_chain_counts)
-        anchor_indptr = lengths_to_offsets(pair_anchor_counts)
+        chain_indptr = Chains.lengths_to_offsets(pair_chain_counts)
+        anchor_indptr = Chains.lengths_to_offsets(pair_anchor_counts)
 
         out_q = np.empty(total_chains, dtype=np.uint32)
         out_t = np.empty(total_chains, dtype=np.uint32)

@@ -6,11 +6,13 @@ import numpy as np
 import pytest
 
 from seroverse.core.collections import (
+    BatchedContainer,
     BoolArray,
     BytesArray,
     Float32Array,
     Int8Array,
     Int32Array,
+    ScalarView,
     Spec,
     SpecContainer,
     SpecEnum,
@@ -39,7 +41,7 @@ class MockRoleSpec(Spec):
 
 
 @dataclass(frozen=True, slots=True)
-class MockRoleSpecs(SpecContainer[MockRoleSpec, "MockRoleSpecs"]):
+class MockRoleSpecs(SpecContainer[MockRoleSpec]):
     r"""Custom `SpecContainer` compiled from `MockRoleSpec` scalar records."""
 
     abbreviations: BytesArray
@@ -169,7 +171,7 @@ def test_spec_enum_validation_errors() -> None:
         B = 1
 
         @classmethod
-        def _compile_specs(cls) -> SpecContainer[Spec, SpecContainer]:
+        def _compile_specs(cls) -> SpecContainer[Spec]:
             return SpecContainer.from_list([Spec(name=b"only_one")])
 
     with pytest.raises(ValueError, match="returned 1 specs for 2 enum members"):
@@ -232,9 +234,9 @@ def test_container_to_dict_chunks_sort_and_pad() -> None:
     # 4. RaggedArrayContainer.pad and chunks
     seqs = Sequences.from_list(
         [
-            Sequence(b"s1", np.array([1, 2, 3], dtype=np.uint8)),
-            Sequence(b"s2", np.array([4], dtype=np.uint8)),
-            Sequence(b"s3", np.array([5, 6, 7, 8, 9], dtype=np.uint8)),
+            Sequence(b"s1", b"\x01\x02\x03"),
+            Sequence(b"s2", b"\x04"),
+            Sequence(b"s3", b"\x05\x06\x07\x08\x09"),
         ]
     )
     seq_chunks = list(seqs.chunks(2))
@@ -264,25 +266,34 @@ def test_container_to_dict_chunks_sort_and_pad() -> None:
     with pytest.raises(ValueError, match="not a ragged field"):
         seqs.pad("lengths")
 
-    # 5. Multi-dimensional array fields (e.g. 2D feature_matrix on SpecContainer)
+    # Support nested BatchedContainer fields while rejecting arbitrary non-array/non-container types
     @dataclass(frozen=True, slots=True)
-    class FeatureSpec(Spec):
-        weight: float
+    class _NestedItem(ScalarView):
+        interval: Interval
+        seq: Sequence
+        score: int
 
     @dataclass(frozen=True, slots=True)
-    class FeatureSpecs(SpecContainer[FeatureSpec, "FeatureSpecs"]):
-        weights: Float32Array
-        feature_matrix: np.ndarray[tuple[int, int], np.dtype[np.float32]]
+    class _NestedBatch(BatchedContainer[_NestedItem]):
+        intervals: Intervals
+        seqs: Sequences
+        scores: Int32Array
 
-    empty_fs = FeatureSpecs.empty()
-    assert len(empty_fs) == 0
-    assert empty_fs.feature_matrix.shape == (0, 0)
+    items = [
+        _NestedItem(Interval(10, 40, Strand.FORWARD), Sequence(b"a", b"ATG"), 5),
+        _NestedItem(Interval(50, 90, Strand.REVERSE), Sequence(b"b", b"TAA"), 9),
+    ]
+    batch = _NestedBatch.from_list(items)
+    assert len(batch) == 2
+    assert batch[0] == items[0]
+    assert batch[1] == items[1]
+    assert len(batch[:1]) == 1
+    assert batch[:1][0] == items[0]
+    assert _NestedBatch.concat([batch[:1], batch[1:]]) == batch
+    assert len(_NestedBatch.empty()) == 0
 
-    fs = FeatureSpecs(
-        names=np.array([b"a", b"b"], dtype="S"),
-        weights=np.array([1.0, 2.0], dtype=np.float32),
-        feature_matrix=np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32),
-    )
-    assert fs[1] == FeatureSpec(name=b"b", weight=2.0)
-    assert fs[:1].feature_matrix.shape == (1, 3)
-    assert FeatureSpecs.concat([fs[:1], fs[1:]]) == fs
+    with pytest.raises(TypeError, match="must be annotated as a 1D NumPy array or BatchedContainer"):
+
+        @dataclass(frozen=True, slots=True)
+        class _InvalidScalarField(BatchedContainer[Spec]):
+            bad_field: int

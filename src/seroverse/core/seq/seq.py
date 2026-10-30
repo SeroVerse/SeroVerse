@@ -12,8 +12,8 @@ Key Classes:
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
-from typing import Any, ClassVar, Self, cast, overload
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Self, overload
 
 import numpy as np
 from numba import njit, prange
@@ -21,10 +21,12 @@ from numba import njit, prange
 from seroverse.core.collections import (
     BoolArray,
     BytesArray,
+    Int8Array,
     Int32Array,
     RaggedArrayContainer,
     ScalarView,
     UInt8Array,
+    UInt64Array,
 )
 from seroverse.core.seq.alphabet import Alphabet, GeneticCode
 
@@ -95,7 +97,7 @@ class Sequence(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
+class Sequences(RaggedArrayContainer[Sequence]):
     r"""A high-performance SoA container for biological sequences.
 
     Stores multiple sequences in a flat, contiguous memory layout using a 1D NumPy array
@@ -115,6 +117,7 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
     seqs: UInt8Array  # concatenated sequences
     offsets: Int32Array  # start index per sequence
     lengths: Int32Array  # length per sequence
+    _lookup_cache: dict[bytes, int] | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def _get_scalar(self, idx: int) -> Sequence:
         r"""Materialize the [`Sequence`][seroverse.core.seq.seq.Sequence] at index `idx`."""
@@ -177,108 +180,94 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
 
         return self[unique_indices]
 
-    def index_of(
+    @overload
+    def index(self, key_or_keys: bytes | np.bytes_) -> int: ...
+
+    @overload
+    def index(self, key_or_keys: BytesArray | Iterable[bytes]) -> Int32Array: ...
+
+    def index(
         self,
-        query_ids: np.ndarray[tuple[int], np.dtype[np.bytes_]] | bytes | np.bytes_ | Iterable[bytes],
-    ) -> np.ndarray[tuple[int], np.dtype[np.int32]] | int:
-        r"""Return the integer index or 1D index array corresponding to the given identifier(s).
+        key_or_keys: bytes | np.bytes_ | BytesArray | Iterable[bytes],
+    ) -> int | Int32Array:
+        r"""Resolve byte identifier(s) to 0-based integer index or `Int32Array` of indices.
+
+        Builds and caches an $O(1)$ hash map on first lookup (preserving first-occurrence index for duplicate IDs).
 
         Args:
-            query_ids (np.ndarray[np.bytes_] | bytes | np.bytes_ | Iterable[bytes]): Single sequence ID
+            key_or_keys (bytes | np.bytes_ | BytesArray | Iterable[bytes]): Single sequence ID
                 or array/iterable of IDs.
 
         Returns:
-            np.ndarray | int: Integer index for scalar queries or 1D array of indices for batch queries.
+            int | Int32Array: Integer index for scalar queries or 1D `int32` array of indices for batch queries.
 
         Raises:
             KeyError: If any requested sequence identifier is not found.
         """
-        if isinstance(query_ids, (bytes, np.bytes_)):
-            target = bytes(query_ids)
-            matches = np.nonzero(self.ids == target)[0]
-            if len(matches) == 0:
+        cache = self._lookup_cache
+        if cache is None:
+            cache = {bytes(self.ids[i]): i for i in range(len(self.ids) - 1, -1, -1)}
+            object.__setattr__(self, "_lookup_cache", cache)
+
+        if isinstance(key_or_keys, (bytes, np.bytes_)):
+            target = bytes(key_or_keys)
+            idx = cache.get(target)
+            if idx is None:
                 raise KeyError(f"Sequence identifier {target!r} not found")
-            return int(matches[0])
+            return idx
 
-        if not isinstance(query_ids, np.ndarray) or query_ids.dtype.kind not in ("S", "a"):
-            query_arr = np.array(list(query_ids), dtype="S")
-        else:
-            query_arr = query_ids
-
-        if len(query_arr) == 0:
+        keys_list = [bytes(k) for k in key_or_keys]
+        if not keys_list:
             return np.empty(0, dtype=np.int32)
 
-        # Vectorized binary search on sorted index map
-        sorter = np.argsort(self.ids)
-        insert_idx = np.searchsorted(self.ids, query_arr, sorter=sorter)
-        valid = insert_idx < len(self.ids)
-        matched_indices = sorter[np.clip(insert_idx, 0, len(self.ids) - 1)]
-        is_exact = valid & (self.ids[matched_indices] == query_arr)
-
-        if not np.all(is_exact):
-            missing = query_arr[~is_exact]
-            raise KeyError(f"Sequence identifiers not found: {missing.tolist()[:5]!r}")
-
-        return matched_indices.astype(np.int32)
-
-    def by_ids(
-        self,
-        query_ids: np.ndarray[tuple[int], np.dtype[np.bytes_]] | bytes | np.bytes_ | Iterable[bytes],
-    ) -> Sequence | Sequences:
-        r"""Fetch sequence record(s) matching the specified identifier(s).
-
-        Args:
-            query_ids (np.ndarray[np.bytes_] | bytes | np.bytes_ | Iterable[bytes]): Single sequence ID
-                or 1D array/iterable of IDs.
-
-        Returns:
-            Sequence | Sequences: A scalar [`Sequence`][seroverse.core.seq.seq.Sequence] if a single byte identifier
-                is passed, or a sub-[`Sequences`][seroverse.core.seq.seq.Sequences] batch matching the query IDs in order.
-
-        Raises:
-            KeyError: If any requested sequence identifier is not found in the container.
-        """
-        idx = self.index_of(query_ids)
-        if isinstance(idx, (int, np.integer)):
-            return self[int(idx)]
-        return self[idx]
+        out = np.empty(len(keys_list), dtype=np.int32)
+        missing: list[bytes] = []
+        for i, k in enumerate(keys_list):
+            idx = cache.get(k)
+            if idx is None:
+                missing.append(k)
+            else:
+                out[i] = idx
+        if missing:
+            raise KeyError(f"Sequence identifiers not found: {missing[:5]!r}")
+        return out
 
     @overload
     def __getitem__(self, item: int | np.integer[Any] | bytes | np.bytes_) -> Sequence: ...
 
     @overload
-    def __getitem__(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Sequences: ...
+    def __getitem__(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Self: ...
 
     @overload
     def __getitem__(
         self,
         item: int | np.integer[Any] | slice | np.ndarray[Any, Any] | list[Any] | bytes | np.bytes_,
-    ) -> Sequence | Sequences: ...
+    ) -> Sequence | Self: ...
 
     def __getitem__(
         self,
         item: int | np.integer[Any] | slice | np.ndarray[Any, Any] | list[Any] | bytes | np.bytes_,
-    ) -> Sequence | Sequences:
+    ) -> Sequence | Self:
         r"""Access sequences by index, slice, boolean mask, or byte identifier(s)."""
         if isinstance(item, (bytes, np.bytes_)):
-            return self.by_ids(item)
-        if isinstance(item, np.ndarray) and item.dtype.kind in ("S", "a"):
-            return self.by_ids(item)
-        if isinstance(item, list) and len(item) > 0 and isinstance(item[0], (bytes, np.bytes_)):
-            return self.by_ids(cast(Iterable[bytes], item))
+            return self._get_scalar(self.index(item))
+        if (isinstance(item, np.ndarray) and item.dtype.kind in ("S", "a")) or (
+            isinstance(item, list) and len(item) > 0 and isinstance(item[0], (bytes, np.bytes_))
+        ):
+            return self._get_slice(self.index(item))
         return super().__getitem__(item)
 
     @classmethod
     def from_bytes(
         cls,
         seqs: list[bytes] | tuple[bytes, ...] | Iterable[bytes],
-        ids: tuple[bytes, ...] | np.ndarray[tuple[int], np.dtype[np.bytes_]] | list[bytes] | None = None,
+        ids: tuple[bytes, ...] | BytesArray | list[bytes] | None = None,
     ) -> Sequences:
         r"""Construct Sequences from a collection of raw sequence byte strings.
 
         Args:
             seqs (Iterable[bytes]): Sequence byte strings.
-            ids (tuple[bytes, ...] | np.ndarray[np.bytes_] | list[bytes] | None): Sequence identifiers.
+            ids (tuple[bytes, ...] | BytesArray | list[bytes] | None): Sequence identifiers.
                 Defaults to integer byte strings (b"0", b"1", ...).
 
         Returns:
@@ -302,34 +291,13 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
         offsets = cls.lengths_to_offsets(lengths)
         return cls(ids_arr, out_seqs, offsets, lengths)
 
-    @classmethod
-    def from_records(cls, records: list[Sequence] | tuple[Sequence, ...] | Iterable[Sequence]) -> Sequences:
-        r"""Construct Sequences from a collection of Sequence objects.
-
-        Args:
-            records (Iterable[Sequence]): Sequence objects.
-
-        Returns:
-            Sequences: Newly constructed sequences container.
-        """
-        records_list = list(records) if not isinstance(records, list) else records
-        if not records_list:
-            return cls.empty()
-
-        ids = np.array([r.id for r in records_list], dtype="S")
-        joined_bytes = b"".join(r.seq for r in records_list)
-        out_seqs = np.frombuffer(joined_bytes, dtype=np.uint8).copy()
-        lengths = np.fromiter((len(r.seq) for r in records_list), dtype=np.int32, count=len(records_list))
-        offsets = cls.lengths_to_offsets(lengths)
-        return cls(ids, out_seqs, offsets, lengths)
-
     def extract(
         self,
-        indices: np.ndarray[tuple[int], np.dtype[np.int32]],
-        starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-        ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-        strands: np.ndarray[tuple[int], np.dtype[np.int8]],
-        new_ids: tuple[bytes, ...] | np.ndarray[tuple[int], np.dtype[np.bytes_]] | list[bytes] | None = None,
+        indices: Int32Array,
+        starts: Int32Array,
+        ends: Int32Array,
+        strands: Int8Array,
+        new_ids: tuple[bytes, ...] | BytesArray | list[bytes] | None = None,
     ) -> Sequences:
         r"""Vectorized sub-sequence extraction from the batch.
 
@@ -372,14 +340,14 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
         )
         return Sequences(new_ids_arr, out_seqs, offsets, lengths)
 
-    def encode(self, alphabet: Alphabet) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
+    def encode(self, alphabet: Alphabet) -> UInt8Array:
         r"""Encode sequence bytes into dense integer values [0..K-1] according to the given Alphabet.
 
         Args:
             alphabet (Alphabet): Alphabet containing precomputed kmer lookup table.
 
         Returns:
-            np.ndarray[tuple[int], np.dtype[np.uint8]]: Array of dense integer indices.
+            UInt8Array: Array of dense integer indices.
         """
         return alphabet.encode(self.seqs)
 
@@ -400,7 +368,7 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
     def translate(
         self,
         code: GeneticCode = GeneticCode.bacterial,
-        frames: np.ndarray[tuple[int], np.dtype[np.int8]] | None = None,
+        frames: Int8Array | None = None,
         to_stop: bool = False,
     ) -> Sequences:
         r"""Vectorized translation of nucleotide sequences into protein sequences.
@@ -410,7 +378,7 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
 
         Args:
             code (GeneticCode): Genetic code translation table to use. Defaults to `GeneticCode.bacterial`.
-            frames (np.ndarray[tuple[int], np.dtype[np.int8]] | None): Reading frame offsets (0, 1, or 2) per sequence.
+            frames (Int8Array | None): Reading frame offsets (0, 1, or 2) per sequence.
                 Defaults to frame 0 for all.
             to_stop (bool): If True, truncates translation at the first stop codon (*). Defaults to False.
 
@@ -472,19 +440,19 @@ class Sequences(RaggedArrayContainer[Sequence, "Sequences"]):
 # Kernels --------------------------------------------------------------------------------------------------------------
 @njit(parallel=True, cache=True, nogil=True)
 def _hash_sequences_kernel(
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-) -> np.ndarray[tuple[int], np.dtype[np.uint64]]:
+    seqs: UInt8Array,
+    offsets: Int32Array,
+    lengths: Int32Array,
+) -> UInt64Array:
     r"""Compute a 64-bit FNV-1a hash for each sequence in parallel.
 
     Args:
-        seqs (np.ndarray[tuple[int], np.dtype[np.uint8]]): Concatenated sequence bytes.
-        offsets (np.ndarray[tuple[int], np.dtype[np.int32]]): Sequence start offsets.
-        lengths (np.ndarray[tuple[int], np.dtype[np.int32]]): Sequence lengths.
+        seqs (UInt8Array): Concatenated sequence bytes.
+        offsets (Int32Array): Sequence start offsets.
+        lengths (Int32Array): Sequence lengths.
 
     Returns:
-        np.ndarray[np.uint64]: 1D array of 64-bit hash values.
+        UInt64Array: 1D array of 64-bit hash values.
     """
     n = len(offsets)
     hashes = np.zeros(n, dtype=np.uint64)
@@ -502,31 +470,27 @@ def _hash_sequences_kernel(
 
 @njit(cache=True, nogil=True, parallel=True)
 def _extract_ragged_kernel(
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    indices: np.ndarray[tuple[int], np.dtype[np.int32]],
-    starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    strands: np.ndarray[tuple[int], np.dtype[np.int8]],
-    comp_map: np.ndarray[tuple[int], np.dtype[np.uint8]],
-) -> tuple[
-    np.ndarray[tuple[int], np.dtype[np.uint8]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-]:
+    seqs: UInt8Array,
+    offsets: Int32Array,
+    indices: Int32Array,
+    starts: Int32Array,
+    ends: Int32Array,
+    strands: Int8Array,
+    comp_map: UInt8Array,
+) -> tuple[UInt8Array, Int32Array, Int32Array]:
     r"""Parallel Numba kernel for multi-sequence sub-region extraction and reverse-complementation.
 
     Args:
-        seqs (np.ndarray): Concatenated parent sequence array.
-        offsets (np.ndarray): Parent sequence start offsets.
-        indices (np.ndarray): Index of parent sequence for each extraction region.
-        starts (np.ndarray): 0-based extraction start coordinates.
-        ends (np.ndarray): 0-based extraction end coordinates.
-        strands (np.ndarray): Strand orientations (1 forward, -1 reverse).
-        comp_map (np.ndarray): Complement character lookup map.
+        seqs (UInt8Array): Concatenated parent sequence array.
+        offsets (Int32Array): Parent sequence start offsets.
+        indices (Int32Array): Index of parent sequence for each extraction region.
+        starts (Int32Array): 0-based extraction start coordinates.
+        ends (Int32Array): 0-based extraction end coordinates.
+        strands (Int8Array): Strand orientations (1 forward, -1 reverse).
+        comp_map (UInt8Array): Complement character lookup map.
 
     Returns:
-        tuple[np.ndarray, np.ndarray, np.ndarray]:
+        tuple[UInt8Array, Int32Array, Int32Array]:
             Tuple of (extracted concatenated sequence bytes, new offsets, new lengths).
     """
     n = len(indices)
@@ -565,10 +529,10 @@ def _extract_ragged_kernel(
 
 @njit(cache=True, nogil=True, parallel=True)
 def _internal_stops_kernel(
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-) -> np.ndarray[tuple[int], np.dtype[np.bool_]]:
+    seqs: UInt8Array,
+    offsets: Int32Array,
+    lengths: Int32Array,
+) -> BoolArray:
     r"""Parallel Numba kernel for detecting internal stop codons in protein sequences.
 
     Args:

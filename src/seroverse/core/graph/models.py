@@ -2,9 +2,9 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from functools import cache
-from typing import Any, Self, cast
+from typing import Any, ClassVar, Self
 
 import numpy as np
 from numba import njit, prange
@@ -193,7 +193,7 @@ class Graph(ScalarView):
         """
         Builds a sparse CSR adjacency matrix and node label array.
 
-        All biological and genomic models in KBank are strictly directed graphs.
+        All biological and genomic models in SeroVerse are strictly directed graphs.
         By default, returns the canonical directed representation. If a mathematical
         algorithm requires a symmetric input matrix (e.g. Laplacian spectrum calculation
         or bidirectional message passing), specify `symmetrize=True`.
@@ -315,12 +315,23 @@ class Graph(ScalarView):
 
 
 @dataclass(slots=True, frozen=True)
-class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedContainer[T, S]):
+class Graphs[T: Graph = Graph](BatchedContainer[T]):
     """
     Base Structure-of-Arrays (SoA) container for batched graph datasets.
     Provides block-diagonal CSR adjacency, Wasserstein spectral distance matrices,
     pan-graph compression, and vectorized SoA array slicing and concatenation.
     """
+
+    _CSR_FIELDS: ClassVar[tuple[str, ...]] = (
+        "node_types",
+        "node_offsets",
+        "edge_sources",
+        "edge_targets",
+        "edge_types",
+        "edge_offsets",
+    )
+    _record_fields: ClassVar[tuple[str, ...]] = ()
+    _scalar_type: ClassVar[type[Any] | None] = Graph
 
     node_types: UInt32Array
     node_offsets: UInt32Array
@@ -328,6 +339,12 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
     edge_targets: UInt32Array
     edge_types: UInt32Array
     edge_offsets: UInt32Array
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "__dataclass_fields__" not in cls.__dict__:
+            return
+        cls._record_fields = tuple(f for f in cls._field_dtypes if f not in cls._CSR_FIELDS)
 
     def __len__(self) -> int:
         return len(self.node_offsets) - 1
@@ -353,14 +370,19 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
     @classmethod
     def empty(cls) -> Self:
         """Create an empty 0-length graph batch."""
-        return cls(
-            node_types=np.empty(0, dtype=np.uint32),
-            node_offsets=np.zeros(1, dtype=np.uint32),
-            edge_sources=np.empty(0, dtype=np.uint32),
-            edge_targets=np.empty(0, dtype=np.uint32),
-            edge_types=np.empty(0, dtype=np.uint32),
-            edge_offsets=np.zeros(1, dtype=np.uint32),
-        )
+        kwargs: dict[str, Any] = {
+            "node_types": np.empty(0, dtype=np.uint32),
+            "node_offsets": np.zeros(1, dtype=np.uint32),
+            "edge_sources": np.empty(0, dtype=np.uint32),
+            "edge_targets": np.empty(0, dtype=np.uint32),
+            "edge_types": np.empty(0, dtype=np.uint32),
+            "edge_offsets": np.zeros(1, dtype=np.uint32),
+        }
+        for f in cls._record_fields:
+            kwargs[f] = np.empty(0, dtype=cls._field_dtypes[f])
+        for f, child_cls in cls._nested_fields.items():
+            kwargs[f] = child_cls.empty()
+        return cls(**kwargs)
 
     @classmethod
     def concat(cls, batches: Iterable[Self]) -> Self:
@@ -372,14 +394,19 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
             return batch_list[0]
 
         nodes, n_offs, sources, targets, types, e_offs = cls._concat_soa_base(batch_list)
-        return cls(
-            node_types=nodes,
-            node_offsets=n_offs,
-            edge_sources=sources,
-            edge_targets=targets,
-            edge_types=types,
-            edge_offsets=e_offs,
-        )
+        kwargs: dict[str, Any] = {
+            "node_types": nodes,
+            "node_offsets": n_offs,
+            "edge_sources": sources,
+            "edge_targets": targets,
+            "edge_types": types,
+            "edge_offsets": e_offs,
+        }
+        for f in cls._record_fields:
+            kwargs[f] = np.concatenate([getattr(b, f) for b in batch_list])
+        for f, child_cls in cls._nested_fields.items():
+            kwargs[f] = child_cls.concat([getattr(b, f) for b in batch_list])
+        return cls(**kwargs)
 
     @classmethod
     def from_list(cls, items: Sequence[T]) -> Self:
@@ -388,10 +415,12 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
         if n_graphs == 0:
             return cls.empty()
 
+        nodes_list = [g.nodes for g in items]
+        edges_list = [g.edges for g in items]
         node_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
         edge_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
-        tot_nodes = sum(len(g.nodes) for g in items)
-        tot_edges = sum(len(g.edges) for g in items)
+        tot_nodes = sum(len(ns) for ns in nodes_list)
+        tot_edges = sum(len(es) for es in edges_list)
 
         node_types = np.empty(tot_nodes, dtype=np.uint32)
         edge_sources = np.empty(tot_edges, dtype=np.uint32)
@@ -400,12 +429,12 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
 
         curr_n = 0
         curr_e = 0
-        for i, g in enumerate(items):
-            gn = len(g.nodes)
-            ge = len(g.edges)
-            for j, node in enumerate(g.nodes):
+        for i, (ns, es) in enumerate(zip(nodes_list, edges_list, strict=True)):
+            gn = len(ns)
+            ge = len(es)
+            for j, node in enumerate(ns):
                 node_types[curr_n + j] = node.type_id if hasattr(node, "type_id") else int(node)
-            for j, edge in enumerate(g.edges):
+            for j, edge in enumerate(es):
                 edge_sources[curr_e + j] = edge.source + curr_n
                 edge_targets[curr_e + j] = edge.target + curr_n
                 edge_types[curr_e + j] = int(edge.edge_type)
@@ -414,14 +443,26 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
             node_offsets[i + 1] = curr_n
             edge_offsets[i + 1] = curr_e
 
-        return cls(
-            node_types=node_types,
-            node_offsets=node_offsets,
-            edge_sources=edge_sources,
-            edge_targets=edge_targets,
-            edge_types=edge_types,
-            edge_offsets=edge_offsets,
-        )
+        kwargs: dict[str, Any] = {
+            "node_types": node_types,
+            "node_offsets": node_offsets,
+            "edge_sources": edge_sources,
+            "edge_targets": edge_targets,
+            "edge_types": edge_types,
+            "edge_offsets": edge_offsets,
+        }
+        if cls._record_fields or cls._nested_fields:
+            scalar_cls = cls._scalar_type or type(items[0])
+            s_fields = tuple(f.name for f in fields(scalar_cls) if f.name not in ("nodes", "edges"))
+            extra_b_fields = tuple(f for f in cls._all_fields if f not in cls._CSR_FIELDS)
+            field_map = dict(zip(extra_b_fields, s_fields, strict=True))
+            for b_f in cls._record_fields:
+                s_f = field_map[b_f]
+                kwargs[b_f] = np.array([getattr(it, s_f) for it in items], dtype=cls._field_dtypes[b_f])
+            for b_f, child_cls in cls._nested_fields.items():
+                s_f = field_map[b_f]
+                kwargs[b_f] = child_cls.from_list([getattr(it, s_f) for it in items])
+        return cls(**kwargs)
 
     @classmethod
     def random(
@@ -497,7 +538,7 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
         )
 
     def _get_scalar(self, idx: int) -> T:
-        """Materialize the [`Graph`][seroverse.core.graph.models.Graph] at index `idx`."""
+        """Materialize the [`Graph`][seroverse.core.graph.models.Graph] (or subclass `T`) at index `idx`."""
         n_s, n_e = int(self.node_offsets[idx]), int(self.node_offsets[idx + 1])
         e_s, e_e = int(self.edge_offsets[idx]), int(self.edge_offsets[idx + 1])
         nodes = tuple(int(x) for x in self.node_types[n_s:n_e])
@@ -509,25 +550,42 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
             )
             for k in range(e_s, e_e)
         )
-        return cast(T, Graph(nodes=nodes, edges=edges))
+        scalar_cls: type[Any] = self._scalar_type or Graph
+        if not self._record_fields and not self._nested_fields:
+            return scalar_cls(nodes=nodes, edges=edges)
+        extra_b_fields = tuple(f for f in self._all_fields if f not in self._CSR_FIELDS)
+        s_fields = tuple(f.name for f in fields(scalar_cls) if f.name not in ("nodes", "edges"))
+        kwargs: dict[str, Any] = {"nodes": nodes, "edges": edges}
+        for b_f, s_f in zip(extra_b_fields, s_fields, strict=True):
+            val = getattr(self, b_f)[idx]
+            if b_f in self._field_dtypes:
+                dt = self._field_dtypes[b_f]
+                if dt.kind in ("S", "a"):
+                    val = bytes(val)
+                elif hasattr(val, "item"):
+                    val = val.item()
+            kwargs[s_f] = val
+        return scalar_cls(**kwargs)
 
-    def _get_slice(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> S:
+    def _get_slice(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Self:
         """Slice a sub-batch of graphs by slice, boolean mask, or index array."""
         indices = self._normalize_indices(item)
         if len(indices) == 0:
-            return cast(S, self.empty())
+            return self.empty()
         nodes_arr, n_offs, sources, targets, types, e_offs = self._slice_soa_arrays(indices)
-        return cast(
-            S,
-            self.__class__(
-                node_types=nodes_arr,
-                node_offsets=n_offs,
-                edge_sources=sources,
-                edge_targets=targets,
-                edge_types=types,
-                edge_offsets=e_offs,
-            ),
-        )
+        kwargs: dict[str, Any] = {
+            "node_types": nodes_arr,
+            "node_offsets": n_offs,
+            "edge_sources": sources,
+            "edge_targets": targets,
+            "edge_types": types,
+            "edge_offsets": e_offs,
+        }
+        for f in self._record_fields:
+            kwargs[f] = getattr(self, f)[indices]
+        for f in self._nested_fields:
+            kwargs[f] = getattr(self, f)[indices]
+        return type(self)(**kwargs)
 
     def get_block_diagonal_graph(self, unweighted: bool = False) -> CSR:
         """
@@ -592,7 +650,7 @@ class Graphs[T: Graph = Graph, S: Graphs[Any, Any] = Graphs[Any, Any]](BatchedCo
         Merges identical nodes, records node occurrence frequencies,
         and computes the exact occurrence frequency (count) of each directed transition.
 
-        Pan-graphs in KBank are strictly directed consensus networks representing
+        Pan-graphs in SeroVerse are strictly directed consensus networks representing
         synteny flow and biosynthetic transitions.
 
         Args:
@@ -793,6 +851,62 @@ def _wasserstein_1d_sorted_kernel(u: np.ndarray, v: np.ndarray) -> float:
     return dist
 
 
+@njit(cache=True, nogil=True)
+def _sym_eigvalsh_kernel(a: np.ndarray) -> np.ndarray:
+    """Compute sorted eigenvalues of a real symmetric matrix in-place via cyclic Jacobi rotations."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    if n == 0:
+        return out
+    if n == 1:
+        out[0] = a[0, 0]
+        return out
+
+    for _ in range(50):
+        max_off = 0.0
+        for p in range(n - 1):
+            for q in range(p + 1, n):
+                apq = abs(a[p, q])
+                if apq > max_off:
+                    max_off = apq
+        if max_off < 1e-13:
+            break
+
+        for p in range(n - 1):
+            for q in range(p + 1, n):
+                apq = a[p, q]
+                if abs(apq) < 1e-15:
+                    continue
+                diff = a[q, q] - a[p, p]
+                if abs(apq) <= 1e-15 * abs(diff):
+                    t = apq / diff
+                else:
+                    tau = diff / (2.0 * apq)
+                    t = (1.0 if tau >= 0.0 else -1.0) / (abs(tau) + np.sqrt(1.0 + tau * tau))
+                c = 1.0 / np.sqrt(1.0 + t * t)
+                s = t * c
+                tau_rot = s / (1.0 + c)
+                a[p, p] -= t * apq
+                a[q, q] += t * apq
+                a[p, q] = 0.0
+                a[q, p] = 0.0
+                for r in range(n):
+                    if r != p and r != q:
+                        arp = a[r, p]
+                        arq = a[r, q]
+                        new_rp = arp - s * (arq + tau_rot * arp)
+                        new_rq = arq + s * (arp - tau_rot * arq)
+                        a[r, p] = new_rp
+                        a[p, r] = new_rp
+                        a[r, q] = new_rq
+                        a[q, r] = new_rq
+
+    for i in range(n):
+        out[i] = a[i, i]
+    out.sort()
+    return out
+
+
 @njit(cache=True, nogil=True, parallel=True)
 def _batch_spectral_distance_matrix_kernel(
     node_offsets: np.ndarray,
@@ -844,7 +958,7 @@ def _batch_spectral_distance_matrix_kernel(
                 elif lap[u, v] != 0.0:
                     lap[u, v] = -lap[u, v] * du * inv_sqrt[v]
 
-        eigs = np.linalg.eigvalsh(lap)
+        eigs = _sym_eigvalsh_kernel(lap)
         for u in range(n_v):
             all_spectra[m_start + u] = eigs[u]
 

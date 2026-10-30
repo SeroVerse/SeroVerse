@@ -1,8 +1,12 @@
 """High-performance C-level and zero-copy NumPy FASTA I/O."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from compression import bz2, gzip, lzma, zstd
 from io import BufferedIOBase, BytesIO, RawIOBase
-from typing import IO, Self
+from pathlib import Path
+from re import Pattern
+from re import compile as re_compile
+from typing import IO, Any, Self
 
 import numpy as np
 
@@ -27,6 +31,16 @@ class FastaReader(Iterator[Sequence]):
     # Precomputed 256-byte C translation table for single-pass uppercase + whitespace deletion
     _UPPER_TABLE: bytes = bytes.maketrans(b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ")
     _WHITESPACE: bytes = b"\r\n\t "
+    _SEQUENCE_FILE_REGEX: Pattern[str] = re_compile(
+        r"\.(?P<ext>f(asta|a|na|fn|as))(\.(?P<compression>gz|bz2|xz|zst|zstd))?$"
+    )
+    _OPENERS: dict[str, Callable[..., Any]] = {
+        "gz": gzip.open,
+        "bz2": bz2.open,
+        "xz": lzma.open,
+        "zst": zstd.open,
+        "zstd": zstd.open,
+    }
 
     __slots__ = (
         "_handle",
@@ -71,6 +85,26 @@ class FastaReader(Iterator[Sequence]):
         """
         return cls(
             BytesIO(data),
+            truncate_id=truncate_id,
+            uppercase=uppercase,
+            chunk_size=chunk_size,
+        )
+
+    @classmethod
+    def from_file(
+        cls,
+        filepath: str | Path,
+        truncate_id: bool = True,
+        uppercase: bool = True,
+        chunk_size: int = 4 * 1024 * 1024,
+    ) -> Self:
+        """Open a plain or compressed (`.gz`, `.bz2`, `.xz`, `.zst`, `.zstd`) FASTA file."""
+        path = Path(filepath)
+        if not (m := cls._SEQUENCE_FILE_REGEX.search(path.name)):
+            raise NotImplementedError(f"Unsupported format: {path}")
+        opener = cls._OPENERS.get(m.group("compression"), open)
+        return cls(
+            opener(path, mode="rb"),
             truncate_id=truncate_id,
             uppercase=uppercase,
             chunk_size=chunk_size,
@@ -181,9 +215,7 @@ class FastaReader(Iterator[Sequence]):
 
         ids = np.array(ids_list, dtype="S")
         lengths = np.fromiter((len(s) for s in seq_parts), dtype=np.int32, count=n)
-        offsets = np.zeros(n, dtype=np.int32)
-        if n > 1:
-            np.cumsum(lengths[:-1], out=offsets[1:])
+        offsets = Sequences.lengths_to_offsets(lengths)
 
         # Single C-level buffer allocation + zero-copy writable uint8 NumPy view
         joined_buf = bytearray().join(seq_parts)

@@ -274,7 +274,7 @@ class Arborescence(ScalarView):
 
 
 @dataclass(slots=True, frozen=True)
-class Arborescences(RaggedArrayContainer[Arborescence, "Arborescences"]):
+class Arborescences(RaggedArrayContainer[Arborescence]):
     r"""Ragged Structure-of-Arrays (SoA) container of [`Arborescence`][seroverse.core.graph.arborescence.Arborescence] trees.
 
     Attributes:

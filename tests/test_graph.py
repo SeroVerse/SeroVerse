@@ -96,8 +96,8 @@ def test_relational_csr_hierarchy_and_builders() -> None:
     assert rel_csr.n_nodes == 7
     assert rel_csr.n_relations == 8
     assert len(rel_csr.virtual_nodes) == 2
-    assert len(rel_csr.src_indices) == rel_csr.nnz
-    assert len(rel_csr.edge_weights) == rel_csr.nnz
+    assert len(rel_csr.indices) == rel_csr.nnz
+    assert len(rel_csr.data) == rel_csr.nnz
 
     g0, _, batch = _make_sample_graphs()
     g_rcsr = g0.as_relational_csr()

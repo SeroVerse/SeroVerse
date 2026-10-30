@@ -92,7 +92,7 @@ class Interval(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class Intervals(BatchedContainer[Interval, "Intervals"]):
+class Intervals(BatchedContainer[Interval]):
     r"""A high-performance Structure-of-Arrays (SoA) collection of genomic intervals.
 
     Stores starts, ends, and strands as parallel 1D NumPy arrays

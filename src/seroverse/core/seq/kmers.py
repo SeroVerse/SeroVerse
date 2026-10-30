@@ -14,15 +14,16 @@ from numba import njit, prange
 
 from seroverse.core.align.score import SubstitutionMatrix, _score_ungapped_diagonal
 from seroverse.core.align.seeds import Seeds
+from seroverse.core.collections import Int32Array, UInt8Array, UInt32Array, UInt64Array
 from seroverse.core.seq.alphabet import Alphabet
 from seroverse.core.seq.seq import Sequences
 
 type _SketchSoA = tuple[
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.uint64]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
+    Int32Array,
+    Int32Array,
+    UInt64Array,
+    UInt32Array,
+    UInt32Array,
 ]
 
 
@@ -32,30 +33,28 @@ class BaseKmerIndex:
     r"""Data-Oriented Structure-of-Arrays (SoA) container for sequence k-mer sketches.
 
     Attributes:
-        hashes (np.ndarray[tuple[int], np.dtype[np.uint64]]): 1D array of 64-bit sketch hashes.
-        seq_indices (np.ndarray[tuple[int], np.dtype[np.uint32]]): 1D array of source sequence indices.
-        positions (np.ndarray[tuple[int], np.dtype[np.uint32]]): 1D array of start positions in sequences.
-        offsets (np.ndarray[tuple[int], np.dtype[np.int32]]): 1D array of sequence record start offsets.
-        lengths (np.ndarray[tuple[int], np.dtype[np.int32]]): 1D array of record counts per sequence.
+        hashes (UInt64Array): 1D array of 64-bit sketch hashes.
+        seq_indices (UInt32Array): 1D array of source sequence indices.
+        positions (UInt32Array): 1D array of start positions in sequences.
+        offsets (Int32Array): 1D array of sequence record start offsets.
+        lengths (Int32Array): 1D array of record counts per sequence.
         n_seqs (int): Total number of indexed sequences.
         is_sorted (bool): True if records are sorted by hash.
         k (int): K-mer length parameter.
         alphabet (Alphabet): Alphabet used for sequence encoding.
-        reduce (bool): True if using a reduced alphabet mapping.
-        lut (np.ndarray[tuple[int], np.dtype[np.uint8]] | None): Optional custom lookup table.
+        lut (UInt8Array | None): Optional custom lookup table.
     """
 
-    hashes: np.ndarray[tuple[int], np.dtype[np.uint64]]
-    seq_indices: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    positions: np.ndarray[tuple[int], np.dtype[np.uint32]]
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]]
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]]
+    hashes: UInt64Array
+    seq_indices: UInt32Array
+    positions: UInt32Array
+    offsets: Int32Array
+    lengths: Int32Array
     n_seqs: int = 0
     is_sorted: bool = False
     k: int = 10
     alphabet: Alphabet = Alphabet.DNA
-    reduce: bool = False
-    lut: np.ndarray[tuple[int], np.dtype[np.uint8]] | None = None
+    lut: UInt8Array | None = None
 
     def __len__(self) -> int:
         r"""Return the number of indexed sequences."""
@@ -67,7 +66,7 @@ class BaseKmerIndex:
         return len(self.hashes)
 
     @property
-    def indptr(self) -> np.ndarray[tuple[int], np.dtype[np.uint32]]:
+    def indptr(self) -> UInt32Array:
         r"""CSR-compatible $(N + 1)$-length index pointer array (`[0, *cumsum(lengths)]`)."""
         n = len(self.offsets)
         if n == 0:
@@ -331,12 +330,9 @@ class FracMinHashIndex(BaseKmerIndex):
         alphabet: Alphabet = Alphabet.DNA,
         scaled: int = 100,
         canonical: bool | None = None,
-        seed: int = 42,
         sort_by_hash: bool = False,
-        lut: np.ndarray[tuple[int], np.dtype[np.uint8]] | None = None,
+        lut: UInt8Array | None = None,
         bits_per_char: int | None = None,
-        reduce: bool | None = None,
-        **kwargs: object,
     ) -> FracMinHashIndex:
         r"""Build a FracMinHashIndex from sequence batch.
 
@@ -346,12 +342,9 @@ class FracMinHashIndex(BaseKmerIndex):
             alphabet (Alphabet): Alphabet instance. Defaults to `Alphabet.DNA`.
             scaled (int): Sampling scale factor. Defaults to 100.
             canonical (bool | None): True if using canonical k-mers. Defaults to alphabet.supports_canonical.
-            seed (int): Seed for hashing. Defaults to 42.
             sort_by_hash (bool): True to sort output records by hash. Defaults to False.
-            lut (np.ndarray | None): Optional custom lookup table.
+            lut (UInt8Array | None): Optional custom lookup table.
             bits_per_char (int | None): Bits per character. Defaults to alphabet.bits_per_char.
-            reduce (bool | None): True to reduce alphabet.
-            **kwargs (object): Additional parameters.
 
         Returns:
             FracMinHashIndex: Built [`FracMinHashIndex`][seroverse.core.seq.kmers.FracMinHashIndex] instance.
@@ -362,7 +355,6 @@ class FracMinHashIndex(BaseKmerIndex):
         resolved_canonical = alphabet.supports_canonical if canonical is None else canonical
         resolved_k = alphabet.default_k if k is None else k
         resolved_bits = alphabet.bits_per_char if bits_per_char is None else bits_per_char
-        resolved_reduce = alphabet is Alphabet.MMSEQS12 if reduce is None else reduce
 
         if resolved_k * resolved_bits > 64:
             raise ValueError(
@@ -376,7 +368,6 @@ class FracMinHashIndex(BaseKmerIndex):
             scaled=scaled,
             canonical=resolved_canonical,
             bits_per_char=resolved_bits,
-            reduce=resolved_reduce,
             lut=lut,
         )
         return template._populate(batch, sort_by_hash=sort_by_hash)
@@ -391,14 +382,12 @@ class RandstrobeIndex(BaseKmerIndex):
         s (int): Sub-k-mer size for open syncmer evaluation. Defaults to 5.
         w_min (int): Minimum syncmer offset window bound. Defaults to 1.
         w_max (int): Maximum syncmer offset window bound. Defaults to 5.
-        reduce (bool): True if using a reduced alphabet mapping. Defaults to True.
     """
 
     alphabet: Alphabet = Alphabet.MMSEQS12
     s: int = 5
     w_min: int = 1
     w_max: int = 5
-    reduce: bool = True
 
     def _extract_soa(self, batch: Sequences) -> _SketchSoA:
         r"""Extract Randstrobe SoA buffers from `batch`."""
@@ -416,11 +405,8 @@ class RandstrobeIndex(BaseKmerIndex):
         w_min: int = 1,
         w_max: int = 5,
         alphabet: Alphabet = Alphabet.MMSEQS12,
-        seed: int = 42,
         sort_by_hash: bool = False,
-        lut: np.ndarray[tuple[int], np.dtype[np.uint8]] | None = None,
-        reduce: bool | None = None,
-        **kwargs: object,
+        lut: UInt8Array | None = None,
     ) -> RandstrobeIndex:
         r"""Build a RandstrobeIndex from sequence batch.
 
@@ -431,11 +417,8 @@ class RandstrobeIndex(BaseKmerIndex):
             w_min (int): Min syncmer window bound. Defaults to 1.
             w_max (int): Max syncmer window bound. Defaults to 5.
             alphabet (Alphabet): Alphabet instance. Defaults to `Alphabet.MMSEQS12`.
-            seed (int): Random seed. Defaults to 42.
             sort_by_hash (bool): True to sort records by hash. Defaults to False.
-            lut (np.ndarray | None): Optional alphabet lookup table.
-            reduce (bool | None): True to reduce alphabet.
-            **kwargs (object): Additional parameters.
+            lut (UInt8Array | None): Optional alphabet lookup table.
 
         Returns:
             RandstrobeIndex: Constructed [`RandstrobeIndex`][seroverse.core.seq.kmers.RandstrobeIndex].
@@ -446,10 +429,7 @@ class RandstrobeIndex(BaseKmerIndex):
         if s >= k:
             raise ValueError("Sub-k-mer size (s) must be strictly less than k-mer size (k).")
 
-        resolved_reduce = alphabet is Alphabet.MMSEQS12 if reduce is None else reduce
-        template = replace(
-            cls.empty(), k=k, s=s, w_min=w_min, w_max=w_max, alphabet=alphabet, reduce=resolved_reduce, lut=lut
-        )
+        template = replace(cls.empty(), k=k, s=s, w_min=w_min, w_max=w_max, alphabet=alphabet, lut=lut)
         return template._populate(batch, sort_by_hash=sort_by_hash)
 
 

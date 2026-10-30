@@ -16,7 +16,7 @@ from numba import njit
 
 from seroverse.core.align.pairwise import PairwiseAligner
 from seroverse.core.align.score import SubstitutionMatrix, _ungapped_pair_prefilter
-from seroverse.core.collections import Int32Array, RaggedArrayContainer, ScalarView
+from seroverse.core.collections import Float32Array, Float64Array, Int32Array, RaggedArrayContainer, ScalarView
 from seroverse.core.graph.csr import CSR
 from seroverse.core.seq.kmers import RandstrobeIndex
 from seroverse.core.seq.seq import Sequences
@@ -41,7 +41,7 @@ class Cluster(ScalarView):
 
 
 @dataclass(slots=True, frozen=True)
-class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
+class Clusters(RaggedArrayContainer[Cluster]):
     r"""Ragged Structure-of-Arrays (SoA) container for sequence clustering results.
 
     Stores centroid representative indices (`representatives`) and variable-length
@@ -71,16 +71,6 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
     def n_seqs(self) -> int:
         r"""Total number of clustered sequences $N$."""
         return len(self.members)
-
-    @property
-    def sizes(self) -> Int32Array:
-        r"""1D array of member counts for each cluster (alias for `lengths`)."""
-        return self.lengths
-
-    @property
-    def representative_indices(self) -> Int32Array:
-        r"""1D array of centroid sequence indices (alias for `representatives`)."""
-        return self.representatives
 
     @property
     def cluster_ids(self) -> Int32Array:
@@ -156,7 +146,7 @@ class Clusters(RaggedArrayContainer[Cluster, "Clusters"]):
         if n_clusters == 0:
             return cls.empty()
 
-        offsets = cls.lengths_to_offsets(sizes)
+        offsets = Clusters.lengths_to_offsets(sizes)
         members = _pack_members(cluster_ids, offsets)
         return cls(
             representatives=representatives,
@@ -233,15 +223,15 @@ class Clusterer:
 
         Args:
             seqs: Input collection of sequences to cluster.
-            roles: Optional 1D array/sequence of integer `GeneRole` IDs (length $N$). When provided,
-                prevents clustering across incompatible known roles (`role > 0`) and, in `"mcl"` mode
-                (or when `min_identity < 60.0`), evaluates all intra-role pairs so divergent functional
-                homologs sharing the same role are aligned even without shared exact k-mer seeds.
+            roles: Optional 1D array/sequence of integer role IDs (length $N$, where `< 0` indicates an
+                unconstrained/wildcard role). When provided, prevents clustering across incompatible known
+                roles (`role >= 0`) and, in `"mcl"` mode (or when `min_identity < 60.0`), evaluates all
+                intra-role pairs so divergent functional homologs sharing the same role are aligned even
+                without shared exact k-mer seeds.
             embeddings: Optional 2D array `(N, D)` of sequence representations (e.g., active-site
-                `conv_max` or `task_weighted` features from `GeneRoleClassifier.transform()`). When
-                provided, enables role-gated twilight-zone homology rescue for pairs with cosine
-                similarity `>= self.motif_rescue_threshold` and blends cosine similarity into MCL
-                edge weights.
+                motif embeddings). When provided, enables role-gated twilight-zone homology rescue for
+                pairs with cosine similarity `>= self.motif_rescue_threshold` and blends cosine similarity
+                into MCL edge weights.
 
         Returns:
             Clusters: Ragged SoA container of cluster assignments and centroid representatives.
@@ -258,7 +248,7 @@ class Clusterer:
                 lengths=np.ones(1, dtype=np.int32),
             )
 
-        roles_arr: np.ndarray[tuple[int], np.dtype[np.int32]] | None = None
+        roles_arr: Int32Array | None = None
         if roles is not None:
             roles_arr = np.asarray(roles, dtype=np.int32)
             if len(roles_arr) != n:
@@ -294,12 +284,12 @@ class Clusterer:
         upper_mask = seeds.query_indices < seeds.target_indices
         candidate_seeds = seeds.filter(upper_mask) if len(seeds) > 0 else seeds
 
-        q_chunks: list[np.ndarray[tuple[int], np.dtype[np.int32]]] = []
-        t_chunks: list[np.ndarray[tuple[int], np.dtype[np.int32]]] = []
-        pident_chunks: list[np.ndarray[tuple[int], np.dtype[np.float32]]] = []
-        bitscore_chunks: list[np.ndarray[tuple[int], np.dtype[np.float32]]] = []
-        q_cov_chunks: list[np.ndarray[tuple[int], np.dtype[np.float64]]] = []
-        t_cov_chunks: list[np.ndarray[tuple[int], np.dtype[np.float64]]] = []
+        q_chunks: list[Int32Array] = []
+        t_chunks: list[Int32Array] = []
+        pident_chunks: list[Float32Array] = []
+        bitscore_chunks: list[Float32Array] = []
+        q_cov_chunks: list[Float64Array] = []
+        t_cov_chunks: list[Float64Array] = []
 
         seeded_pairs: set[int] = set()
         if len(candidate_seeds) > 0:
@@ -309,7 +299,7 @@ class Clusterer:
             if roles_arr is not None:
                 r_q = roles_arr[q_idx]
                 r_t = roles_arr[t_idx]
-                compat = (r_q == r_t) | (r_q == 29) | (r_t == 29) | (r_q < 0) | (r_t < 0) | (alignments.pidents >= 80.0)
+                compat = (r_q == r_t) | (r_q < 0) | (r_t < 0) | (alignments.pidents >= 80.0)
             else:
                 compat = np.ones(len(q_idx), dtype=np.bool_)
 
@@ -340,15 +330,15 @@ class Clusterer:
         # 1b. MMseqs2-Style Reduced-Alphabet + Ungapped BLOSUM62 Diagonal Prefilter & Unbanded SW for Divergent Homologs
         if sensitive_mode:
             min_cov_eff = max(float(self.min_coverage), 0.0)
-            extra_q_parts: list[np.ndarray[tuple[int], np.dtype[np.int32]]] = []
-            extra_t_parts: list[np.ndarray[tuple[int], np.dtype[np.int32]]] = []
+            extra_q_parts: list[Int32Array] = []
+            extra_t_parts: list[Int32Array] = []
 
             if roles_arr is not None:
                 small_q_list: list[int] = []
                 small_t_list: list[int] = []
                 seq_lens = seqs.lengths
                 for r_val in np.unique(roles_arr):
-                    if r_val < 0 or r_val == 29:
+                    if r_val < 0:
                         continue
                     members_r = np.where(roles_arr == r_val)[0].astype(np.int32)
                     m_r = len(members_r)
@@ -506,7 +496,7 @@ class Clusterer:
             if roles_arr is not None:
                 rq_all = roles_arr[all_q]
                 rt_all = roles_arr[all_t]
-                same_role = (rq_all == rt_all) & (rq_all >= 0) & (rq_all != 29)
+                same_role = (rq_all == rt_all) & (rq_all >= 0)
             else:
                 same_role = np.ones(len(all_q), dtype=np.bool_)
             twilight_pident = max(15.0, eff_min_identity - 10.0)
@@ -588,13 +578,12 @@ def _pack_members(
 
 
 @njit(nogil=True, cache=True)
-def _cdhit_cluster(
+def _build_undirected_adj(
     n_seqs: int,
-    order: np.ndarray,
-    q_indices: np.ndarray,
-    t_indices: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    r"""Numba kernel for length-prioritized greedy incremental clustering (CD-HIT style)."""
+    q_indices: Int32Array,
+    t_indices: Int32Array,
+) -> tuple[Int32Array, Int32Array, Int32Array]:
+    r"""Build symmetric undirected CSR `(degree, offsets, adj)` arrays from edge lists `(q_indices, t_indices)`."""
     n_edges = len(q_indices)
     degree = np.zeros(n_seqs, dtype=np.int32)
     for p in range(n_edges):
@@ -614,6 +603,18 @@ def _cdhit_cluster(
         cur_pos[u] += 1
         adj[cur_pos[v]] = u
         cur_pos[v] += 1
+    return degree, offsets, adj
+
+
+@njit(nogil=True, cache=True)
+def _cdhit_cluster(
+    n_seqs: int,
+    order: Int32Array,
+    q_indices: Int32Array,
+    t_indices: Int32Array,
+) -> tuple[Int32Array, Int32Array, Int32Array]:
+    r"""Numba kernel for length-prioritized greedy incremental clustering (CD-HIT style)."""
+    _, offsets, adj = _build_undirected_adj(n_seqs, q_indices, t_indices)
 
     cluster_ids = np.full(n_seqs, -1, dtype=np.int32)
     reps_list: list[int] = []
@@ -650,29 +651,11 @@ def _cdhit_cluster(
 @njit(nogil=True, cache=True)
 def _greedy_cover_cluster(
     n_seqs: int,
-    q_indices: np.ndarray,
-    t_indices: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    q_indices: Int32Array,
+    t_indices: Int32Array,
+) -> tuple[Int32Array, Int32Array, Int32Array]:
     r"""Numba kernel for iterative maximum uncovered degree greedy set cover."""
-    n_edges = len(q_indices)
-    degree = np.zeros(n_seqs, dtype=np.int32)
-    for p in range(n_edges):
-        degree[q_indices[p]] += 1
-        degree[t_indices[p]] += 1
-
-    offsets = np.zeros(n_seqs + 1, dtype=np.int32)
-    for i in range(n_seqs):
-        offsets[i + 1] = offsets[i] + degree[i]
-
-    adj = np.empty(offsets[n_seqs], dtype=np.int32)
-    cur_pos = offsets[:-1].copy()
-    for p in range(n_edges):
-        u = q_indices[p]
-        v = t_indices[p]
-        adj[cur_pos[u]] = v
-        cur_pos[u] += 1
-        adj[cur_pos[v]] = u
-        cur_pos[v] += 1
+    degree, offsets, adj = _build_undirected_adj(n_seqs, q_indices, t_indices)
 
     cluster_ids = np.full(n_seqs, -1, dtype=np.int32)
     reps_list: list[int] = []
@@ -796,14 +779,53 @@ def _upgma_component_kernel(
     return labels
 
 
+def _group_by_component(
+    n_seqs: int,
+    q_indices: Int32Array,
+    t_indices: Int32Array,
+) -> tuple[int, Int32Array, Int32Array, Int32Array, Int32Array, Int32Array, Int32Array]:
+    r"""Decompose edges into connected components and return sorted node/edge slice bounds per component."""
+    n_comp, comp_labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
+    comp_ids = np.arange(n_comp)
+    edge_comp = comp_labels[q_indices]
+    edge_order = np.argsort(edge_comp, kind="mergesort").astype(np.int32)
+    sorted_ec = edge_comp[edge_order]
+    ec_starts = np.searchsorted(sorted_ec, comp_ids, side="left").astype(np.int32)
+    ec_ends = np.searchsorted(sorted_ec, comp_ids, side="right").astype(np.int32)
+
+    comp_node_order = np.argsort(comp_labels, kind="mergesort").astype(np.int32)
+    sorted_nc = comp_labels[comp_node_order]
+    nc_starts = np.searchsorted(sorted_nc, comp_ids, side="left").astype(np.int32)
+    nc_ends = np.searchsorted(sorted_nc, comp_ids, side="right").astype(np.int32)
+    return n_comp, edge_order, ec_starts, ec_ends, comp_node_order, nc_starts, nc_ends
+
+
+def _select_longest_representatives(
+    cluster_ids: Int32Array,
+    lengths: Int32Array,
+    n_clusters: int,
+) -> tuple[Int32Array, Int32Array]:
+    r"""Select the longest sequence in each cluster as its representative centroid."""
+    reps = np.empty(n_clusters, dtype=np.int32)
+    sizes = np.bincount(cluster_ids, minlength=n_clusters).astype(np.int32)
+    order = np.argsort(-lengths)
+    seen = np.zeros(n_clusters, dtype=np.bool_)
+    for idx in order:
+        c = cluster_ids[idx]
+        if not seen[c]:
+            seen[c] = True
+            reps[c] = idx
+    return reps, sizes
+
+
 def _upgma_cluster(
     n_seqs: int,
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
+    lengths: Int32Array,
+    q_indices: Int32Array,
+    t_indices: Int32Array,
     pidents: np.ndarray[Any, np.dtype[np.floating[Any]]],
     min_identity: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Int32Array, Int32Array, Int32Array]:
     r"""Hierarchical average-linkage (UPGMA) clustering via compiled Numba kernels."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
@@ -825,18 +847,9 @@ def _upgma_cluster(
         n_clusters = int(raw_labels.max()) + 1
         cluster_ids = raw_labels
     else:
-        n_comp, comp_labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
-        edge_comp = comp_labels[q_indices]
-        edge_order = np.argsort(edge_comp, kind="mergesort")
-        sorted_ec = edge_comp[edge_order]
-        ec_starts = np.searchsorted(sorted_ec, np.arange(n_comp), side="left")
-        ec_ends = np.searchsorted(sorted_ec, np.arange(n_comp), side="right")
-
-        comp_node_order = np.argsort(comp_labels, kind="mergesort")
-        sorted_nc = comp_labels[comp_node_order]
-        nc_starts = np.searchsorted(sorted_nc, np.arange(n_comp), side="left")
-        nc_ends = np.searchsorted(sorted_nc, np.arange(n_comp), side="right")
-
+        n_comp, edge_order, ec_starts, ec_ends, comp_node_order, nc_starts, nc_ends = _group_by_component(
+            n_seqs, q_indices, t_indices
+        )
         cluster_ids = np.empty(n_seqs, dtype=np.int32)
         global_local_map = np.empty(n_seqs, dtype=np.int32)
         n_clusters = 0
@@ -857,26 +870,16 @@ def _upgma_cluster(
             cluster_ids[nodes_c] = sub_labels + n_clusters
             n_clusters += n_sub
 
-    reps = np.empty(n_clusters, dtype=np.int32)
-    sizes = np.bincount(cluster_ids, minlength=n_clusters).astype(np.int32)
-
-    order = np.argsort(-lengths)
-    seen = np.zeros(n_clusters, dtype=np.bool_)
-    for idx in order:
-        c = cluster_ids[idx]
-        if not seen[c]:
-            seen[c] = True
-            reps[c] = idx
-
+    reps, sizes = _select_longest_representatives(cluster_ids, lengths, n_clusters)
     return cluster_ids, reps, sizes
 
 
 def _connected_components_cluster(
     n_seqs: int,
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    lengths: Int32Array,
+    q_indices: Int32Array,
+    t_indices: Int32Array,
+) -> tuple[Int32Array, Int32Array, Int32Array]:
     r"""Transitive closure connected components clustering via compiled Union-Find."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
@@ -885,32 +888,21 @@ def _connected_components_cluster(
         return np.arange(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.ones(n_seqs, dtype=np.int32)
 
     n_components, labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
-
     cluster_ids = labels.astype(np.int32, copy=False)
-    sizes = np.bincount(cluster_ids, minlength=n_components).astype(np.int32)
-
-    order = np.argsort(-lengths)
-    reps = np.empty(n_components, dtype=np.int32)
-    seen = np.zeros(n_components, dtype=np.bool_)
-    for idx in order:
-        c = cluster_ids[idx]
-        if not seen[c]:
-            seen[c] = True
-            reps[c] = idx
-
+    reps, sizes = _select_longest_representatives(cluster_ids, lengths, n_components)
     return cluster_ids, reps, sizes
 
 
 def _mcl_cluster(
     n_seqs: int,
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_indices: np.ndarray[tuple[int], np.dtype[np.int32]],
+    lengths: Int32Array,
+    q_indices: Int32Array,
+    t_indices: Int32Array,
     bitscores: np.ndarray[Any, np.dtype[np.floating[Any]]],
     inflation: float = 2.0,
     max_iter: int = 100,
     tol: float = 1e-5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Int32Array, Int32Array, Int32Array]:
     r"""Markov Cluster Algorithm (MCL) on length-normalized alignment bitscores per connected component."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
@@ -923,19 +915,9 @@ def _mcl_cluster(
     norm_weights = np.maximum(bitscores.astype(np.float64) / max_lens, 1e-4)
 
     # Decompose graph into connected components so MCL runs on compact local subgraphs
-    n_comp, comp_labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
-
-    # Pre-group edges by connected component
-    edge_comp = comp_labels[q_indices]
-    edge_order = np.argsort(edge_comp, kind="mergesort")
-    sorted_ec = edge_comp[edge_order]
-    ec_starts = np.searchsorted(sorted_ec, np.arange(n_comp), side="left")
-    ec_ends = np.searchsorted(sorted_ec, np.arange(n_comp), side="right")
-
-    comp_node_order = np.argsort(comp_labels, kind="mergesort")
-    sorted_nc = comp_labels[comp_node_order]
-    nc_starts = np.searchsorted(sorted_nc, np.arange(n_comp), side="left")
-    nc_ends = np.searchsorted(sorted_nc, np.arange(n_comp), side="right")
+    n_comp, edge_order, ec_starts, ec_ends, comp_node_order, nc_starts, nc_ends = _group_by_component(
+        n_seqs, q_indices, t_indices
+    )
 
     cluster_ids = np.full(n_seqs, -1, dtype=np.int32)
     reps_list: list[int] = []

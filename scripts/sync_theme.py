@@ -7,8 +7,6 @@ the pillar-specific `docs/assets/favicon.svg` from `SeroVerse` into
 `../SeroRef`, `../KBank`, `../SeroGen`, and `../SeroEpi`.
 """
 
-from __future__ import annotations
-
 import argparse
 import shutil
 from pathlib import Path

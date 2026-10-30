@@ -1,6 +1,4 @@
-"""Asynchronous client for the EMBL-EBI ENA Portal REST API."""
-
-from __future__ import annotations
+"""Client for the EMBL-EBI ENA Portal REST API."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -13,7 +11,7 @@ ENA_PORTAL_URL = "https://www.ebi.ac.uk/ena/portal/api"
 
 @dataclass(frozen=True, slots=True)
 class ENASampleRecord:
-    """Immutable ENA Portal `sample` record decoded via `msgspec`."""
+    """Immutable ENA Portal `sample` record."""
 
     sample_accession: str = ""
     scientific_name: str = ""
@@ -22,10 +20,21 @@ class ENASampleRecord:
     serovar: str = ""
     tax_id: str = ""
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ENASampleRecord:
+        return cls(
+            sample_accession=str(data.get("sample_accession") or ""),
+            scientific_name=str(data.get("scientific_name") or ""),
+            strain=str(data.get("strain") or ""),
+            serotype=str(data.get("serotype") or ""),
+            serovar=str(data.get("serovar") or ""),
+            tax_id=str(data.get("tax_id") or ""),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ENAAssemblyRecord:
-    """Immutable ENA Portal `assembly` record decoded via `msgspec`."""
+    """Immutable ENA Portal `assembly` record."""
 
     accession: str = ""
     sample_accession: str = ""
@@ -33,9 +42,19 @@ class ENAAssemblyRecord:
     strain: str = ""
     tax_id: str = ""
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ENAAssemblyRecord:
+        return cls(
+            accession=str(data.get("accession") or ""),
+            sample_accession=str(data.get("sample_accession") or ""),
+            scientific_name=str(data.get("scientific_name") or ""),
+            strain=str(data.get("strain") or ""),
+            tax_id=str(data.get("tax_id") or ""),
+        )
+
 
 class ENAClient(Client):
-    """Asynchronous client for the EMBL-EBI ENA Portal API."""
+    """Client for the EMBL-EBI ENA Portal API."""
 
     def __init__(
         self,
@@ -54,40 +73,33 @@ class ENAClient(Client):
             recorder=recorder,
         )
 
-    async def search_samples(
+    def _search_portal(self, result: str, query: str, fields: Sequence[str], limit: int) -> list[dict[str, Any]]:
+        params = {
+            "result": result,
+            "query": query,
+            "fields": ",".join(fields),
+            "limit": str(limit),
+            "format": "json",
+        }
+        res = self.get_data("search", params=params, allow_404=True)
+        if isinstance(res, list):
+            return [x for x in res if isinstance(x, dict)]
+        return []
+
+    def search_samples(
         self,
         query: str,
         fields: Sequence[str] = ("sample_accession", "scientific_name", "strain", "serotype", "serovar", "tax_id"),
         limit: int = 0,
     ) -> list[ENASampleRecord]:
-        """Query `search?result=sample` and decode directly into `list[ENASampleRecord]`."""
-        params = {
-            "result": "sample",
-            "query": query,
-            "fields": ",".join(fields),
-            "limit": str(limit),
-            "format": "json",
-        }
-        try:
-            return await self.get_json("search", type_=list[ENASampleRecord], params=params)
-        except Exception:
-            return []
+        """Query `search?result=sample` and return `list[ENASampleRecord]`."""
+        return [ENASampleRecord.from_dict(x) for x in self._search_portal("sample", query, fields, limit)]
 
-    async def search_assemblies(
+    def search_assemblies(
         self,
         query: str,
         fields: Sequence[str] = ("accession", "sample_accession", "scientific_name", "strain", "tax_id"),
         limit: int = 0,
     ) -> list[ENAAssemblyRecord]:
-        """Query `search?result=assembly` and decode directly into `list[ENAAssemblyRecord]`."""
-        params = {
-            "result": "assembly",
-            "query": query,
-            "fields": ",".join(fields),
-            "limit": str(limit),
-            "format": "json",
-        }
-        try:
-            return await self.get_json("search", type_=list[ENAAssemblyRecord], params=params)
-        except Exception:
-            return []
+        """Query `search?result=assembly` and return `list[ENAAssemblyRecord]`."""
+        return [ENAAssemblyRecord.from_dict(x) for x in self._search_portal("assembly", query, fields, limit)]

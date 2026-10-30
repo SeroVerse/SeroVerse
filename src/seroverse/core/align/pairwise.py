@@ -17,8 +17,6 @@ Key Classes:
     - [`PairwiseAligner`][seroverse.core.align.pairwise.PairwiseAligner]: Multi-mode pairwise alignment & prefilter engine.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -89,7 +87,7 @@ class PairwiseAlignment(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class PairwiseAlignments(BatchedContainer[PairwiseAlignment, "PairwiseAlignments"]):
+class PairwiseAlignments(BatchedContainer[PairwiseAlignment]):
     r"""A high-performance SoA container for the results of multiple pairwise alignments.
 
     This class stores alignment statistics in a Structure-of-Arrays (SoA) layout using 1D NumPy arrays.

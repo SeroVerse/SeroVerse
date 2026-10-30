@@ -11,8 +11,6 @@ so Zensical's `{% block announce %}` in `docs/overrides/main.html` renders a
 dismissible banner across all SeroVerse documentation sites.
 """
 
-from __future__ import annotations
-
 import html
 import json
 import os

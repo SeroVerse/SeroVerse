@@ -18,6 +18,8 @@ from typing import Any, ClassVar, Self
 import numpy as np
 from numba import njit, prange
 
+from seroverse.core.collections import Float64Array, Int8Array, Int32Array, UInt8Array
+
 
 # Exceptions -----------------------------------------------------------------------------------------------------------
 class AlphabetError(ValueError):
@@ -54,15 +56,9 @@ class Alphabet:
     default_k: int = 0
     supports_canonical: bool = False
     name: bytes | None = None
-    kmer_lut: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    ascii_lut: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    complement_lut: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
+    kmer_lut: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    ascii_lut: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    complement_lut: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
 
     _CACHE: ClassVar[dict[Any, Self]] = {}
 
@@ -268,16 +264,14 @@ class Alphabet:
         mask = (1 << (bps * (k - 1))) - 1
         return bps, mask, dtype
 
-    def encode(
-        self, seq: bytes | bytearray | memoryview | np.ndarray[tuple[int], np.dtype[np.uint8]]
-    ) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
+    def encode(self, seq: bytes | bytearray | memoryview | UInt8Array) -> UInt8Array:
         r"""Encode ASCII sequence bytes into dense integer values [0..K-1].
 
         Args:
-            seq (bytes | bytearray | memoryview | np.ndarray): Input sequence bytes or 1D array.
+            seq (bytes | bytearray | memoryview | UInt8Array): Input sequence bytes or 1D array.
 
         Returns:
-            np.ndarray[tuple[int], np.dtype[np.uint8]]: Array of dense integer indices.
+            UInt8Array: Array of dense integer indices.
         """
         arr = seq if isinstance(seq, np.ndarray) else np.frombuffer(seq, dtype=np.uint8)
         if arr.ndim == 1 and arr.dtype == np.uint8:
@@ -286,16 +280,14 @@ class Alphabet:
             return _lut_map_serial(arr, self.kmer_lut)
         return self.kmer_lut[arr]
 
-    def reduce(
-        self, seq: bytes | bytearray | memoryview | np.ndarray[tuple[int], np.dtype[np.uint8]]
-    ) -> bytes | np.ndarray[tuple[int], np.dtype[np.uint8]]:
+    def reduce(self, seq: bytes | bytearray | memoryview | UInt8Array) -> bytes | UInt8Array:
         r"""Perform vectorized reduction of ASCII sequence bytes into reduced representative ASCII characters.
 
         Args:
-            seq (bytes | bytearray | memoryview | np.ndarray): Input sequence bytes or 1D array.
+            seq (bytes | bytearray | memoryview | UInt8Array): Input sequence bytes or 1D array.
 
         Returns:
-            bytes | np.ndarray[tuple[int], np.dtype[np.uint8]]: Reduced sequence(s) in ASCII format.
+            bytes | UInt8Array: Reduced sequence(s) in ASCII format.
         """
         if isinstance(seq, np.ndarray):
             if seq.ndim == 1 and seq.dtype == np.uint8:
@@ -373,42 +365,15 @@ class GeneticCode:
     name: bytes
     start_codons: frozenset[bytes]
     stop_codons: frozenset[bytes]
-    _char_map: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    _codon_map: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    _starts_mask: np.ndarray[tuple[int], np.dtype[np.bool_]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.bool_), repr=False
-    )
-    _stops_mask: np.ndarray[tuple[int], np.dtype[np.bool_]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.bool_), repr=False
-    )
-    start_mask_64: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    stop_mask_64: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    rev_start_mask_64: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    rev_stop_mask_64: np.ndarray[tuple[int], np.dtype[np.uint8]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False
-    )
-    start_log_priors_64: np.ndarray[tuple[int], np.dtype[np.float64]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.float64), repr=False
-    )
-    rev_start_log_priors_64: np.ndarray[tuple[int], np.dtype[np.float64]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.float64), repr=False
-    )
-    stop_log_priors_64: np.ndarray[tuple[int], np.dtype[np.float64]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.float64), repr=False
-    )
-    rev_stop_log_priors_64: np.ndarray[tuple[int], np.dtype[np.float64]] = field(
-        default_factory=lambda: np.empty(0, dtype=np.float64), repr=False
-    )
+    _codon_map: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    start_mask_64: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    stop_mask_64: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    rev_start_mask_64: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    rev_stop_mask_64: UInt8Array = field(default_factory=lambda: np.empty(0, dtype=np.uint8), repr=False)
+    start_log_priors_64: Float64Array = field(default_factory=lambda: np.empty(0, dtype=np.float64), repr=False)
+    rev_start_log_priors_64: Float64Array = field(default_factory=lambda: np.empty(0, dtype=np.float64), repr=False)
+    stop_log_priors_64: Float64Array = field(default_factory=lambda: np.empty(0, dtype=np.float64), repr=False)
+    rev_stop_log_priors_64: Float64Array = field(default_factory=lambda: np.empty(0, dtype=np.float64), repr=False)
 
     _CACHE: ClassVar[dict[Any, Self]] = {}
     standard: ClassVar[GeneticCode]
@@ -449,26 +414,14 @@ class GeneticCode:
         object.__setattr__(self, "start_codons", start_codons)
         object.__setattr__(self, "stop_codons", stop_codons)
 
-        # Reuse Alphabet.DNA.kmer_lut directly (A=0, C=1, G=2, T/U=3, others=4)
         char_map = Alphabet.DNA.kmer_lut
-        object.__setattr__(self, "_char_map", char_map)
 
         # Build _codon_map: 5*5*5 = 125 entries (88 = ord('X'))
         codon_map = np.full(125, ord("X"), dtype=np.uint8)
-        starts_mask = np.zeros(125, dtype=bool)
-        stops_mask = np.zeros(125, dtype=bool)
 
         for codon, aa in mapping.items():
             idx = int(char_map[codon[0]]) * 25 + int(char_map[codon[1]]) * 5 + int(char_map[codon[2]])
             codon_map[idx] = aa[0]
-
-        for sc in start_codons:
-            idx = int(char_map[sc[0]]) * 25 + int(char_map[sc[1]]) * 5 + int(char_map[sc[2]])
-            starts_mask[idx] = True
-
-        for st in stop_codons:
-            idx = int(char_map[st[0]]) * 25 + int(char_map[st[1]]) * 5 + int(char_map[st[2]])
-            stops_mask[idx] = True
 
         # Build 64-entry (4x4x4) trinucleotide LUTs for Viterbi & gene extraction
         start_mask_64 = np.zeros(64, dtype=np.uint8)
@@ -530,8 +483,6 @@ class GeneticCode:
 
         for arr in (
             codon_map,
-            starts_mask,
-            stops_mask,
             start_mask_64,
             stop_mask_64,
             rev_start_mask_64,
@@ -544,8 +495,6 @@ class GeneticCode:
             arr.flags.writeable = False
 
         object.__setattr__(self, "_codon_map", codon_map)
-        object.__setattr__(self, "_starts_mask", starts_mask)
-        object.__setattr__(self, "_stops_mask", stops_mask)
         object.__setattr__(self, "start_mask_64", start_mask_64)
         object.__setattr__(self, "stop_mask_64", stop_mask_64)
         object.__setattr__(self, "rev_start_mask_64", rev_start_mask_64)
@@ -615,19 +564,19 @@ class GeneticCode:
 
     def translate(
         self,
-        seq: bytes | bytearray | memoryview | np.ndarray[tuple[int], np.dtype[np.uint8]],
+        seq: bytes | bytearray | memoryview | UInt8Array,
         frame: int = 0,
         to_stop: bool = False,
-    ) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
+    ) -> UInt8Array:
         r"""Translate a single nucleotide sequence into an ASCII protein sequence.
 
         Args:
-            seq (bytes | bytearray | memoryview | np.ndarray): Input nucleotide sequence.
+            seq (bytes | bytearray | memoryview | UInt8Array): Input nucleotide sequence.
             frame (int): Reading frame offset (0, 1, or 2). Defaults to 0.
             to_stop (bool): If True, truncates translation at the first stop codon (*). Defaults to False.
 
         Returns:
-            np.ndarray[tuple[int], np.dtype[np.uint8]]: Translated protein sequence in ASCII format.
+            UInt8Array: Translated protein sequence in ASCII format.
         """
         if not isinstance(seq, np.ndarray):
             arr = np.ascontiguousarray(np.frombuffer(seq, np.uint8))
@@ -637,31 +586,27 @@ class GeneticCode:
         if len(arr) < 3:
             return np.empty(0, dtype=np.uint8)
 
-        return _translate_kernel(arr, frame, self._char_map, self._codon_map, to_stop)
+        return _translate_kernel(arr, frame, Alphabet.DNA.kmer_lut, self._codon_map, to_stop)
 
     def translate_ragged(
         self,
-        seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-        offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-        lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-        frames: np.ndarray[tuple[int], np.dtype[np.int8]] | None = None,
+        seqs: UInt8Array,
+        offsets: Int32Array,
+        lengths: Int32Array,
+        frames: Int8Array | None = None,
         to_stop: bool = False,
-    ) -> tuple[
-        np.ndarray[tuple[int], np.dtype[np.uint8]],
-        np.ndarray[tuple[int], np.dtype[np.int32]],
-        np.ndarray[tuple[int], np.dtype[np.int32]],
-    ]:
+    ) -> tuple[UInt8Array, Int32Array, Int32Array]:
         r"""Translate a ragged batch of nucleotide sequences in parallel.
 
         Args:
-            seqs (np.ndarray[tuple[int], np.dtype[np.uint8]]): Concatenated nucleotide sequence bytes.
-            offsets (np.ndarray[tuple[int], np.dtype[np.int32]]): Start offsets per sequence.
-            lengths (np.ndarray[tuple[int], np.dtype[np.int32]]): Sequence lengths.
-            frames (np.ndarray[tuple[int], np.dtype[np.int8]] | None): Reading frame offsets (0, 1, or 2) per sequence.
+            seqs (UInt8Array): Concatenated nucleotide sequence bytes.
+            offsets (Int32Array): Start offsets per sequence.
+            lengths (Int32Array): Sequence lengths.
+            frames (Int8Array | None): Reading frame offsets (0, 1, or 2) per sequence.
             to_stop (bool): If True, truncates translation at the first stop codon (*). Defaults to False.
 
         Returns:
-            tuple[np.ndarray, np.ndarray, np.ndarray]: Tuple of (out_seqs, out_offsets, out_lengths) arrays.
+            tuple[UInt8Array, Int32Array, Int32Array]: Tuple of (out_seqs, out_offsets, out_lengths) arrays.
         """
         n_seqs = len(offsets)
         if n_seqs == 0:
@@ -676,7 +621,7 @@ class GeneticCode:
             offsets,
             lengths,
             frames,
-            self._char_map,
+            Alphabet.DNA.kmer_lut,
             self._codon_map,
             to_stop,
         )
@@ -770,9 +715,9 @@ GeneticCode.bacterial = GeneticCode(
 # Numba Kernels --------------------------------------------------------------------------------------------------------
 @njit(cache=True, nogil=True)
 def _lut_map_serial(
-    arr: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    lut: np.ndarray[tuple[int], np.dtype[np.uint8]],
-) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
+    arr: UInt8Array,
+    lut: UInt8Array,
+) -> UInt8Array:
     r"""Map a 1D `uint8` array through a 256-byte lookup table on a single thread."""
     n = len(arr)
     out = np.empty(n, dtype=np.uint8)
@@ -783,9 +728,9 @@ def _lut_map_serial(
 
 @njit(parallel=True, cache=True, nogil=True)
 def _lut_map_parallel(
-    arr: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    lut: np.ndarray[tuple[int], np.dtype[np.uint8]],
-) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
+    arr: UInt8Array,
+    lut: UInt8Array,
+) -> UInt8Array:
     r"""Map a 1D `uint8` array through a 256-byte lookup table in parallel."""
     n = len(arr)
     out = np.empty(n, dtype=np.uint8)
@@ -796,12 +741,12 @@ def _lut_map_parallel(
 
 @njit(cache=True, nogil=True)
 def _translate_kernel(
-    seq: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    seq: UInt8Array,
     frame: int,
-    char_map: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    codon_map: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    char_map: UInt8Array,
+    codon_map: UInt8Array,
     to_stop: bool,
-) -> np.ndarray[tuple[int], np.dtype[np.uint8]]:
+) -> UInt8Array:
     r"""Translate a single sequence array starting from a given reading frame."""
     n_codons = (len(seq) - frame) // 3
     if n_codons <= 0:
@@ -828,18 +773,14 @@ def _translate_kernel(
 
 @njit(parallel=True, cache=True, nogil=True)
 def _translate_ragged_kernel(
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    frames: np.ndarray[tuple[int], np.dtype[np.int8]] | None,
-    char_map: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    codon_map: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    seqs: UInt8Array,
+    offsets: Int32Array,
+    lengths: Int32Array,
+    frames: Int8Array | None,
+    char_map: UInt8Array,
+    codon_map: UInt8Array,
     to_stop: bool,
-) -> tuple[
-    np.ndarray[tuple[int], np.dtype[np.uint8]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-]:
+) -> tuple[UInt8Array, Int32Array, Int32Array]:
     r"""Parallel Numba kernel translating a batch of ragged sequences without duplicate codon decoding."""
     n_seqs = len(offsets)
     out_lengths = np.empty(n_seqs, dtype=np.int32)

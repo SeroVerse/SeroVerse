@@ -8,7 +8,7 @@ using the Fruchterman-Reingold spring-electrical algorithm.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 from numba import njit
@@ -79,7 +79,7 @@ class LayoutEngine:
 
     def __call__(
         self,
-        graph: Graph | Graphs[Any, Any] | CSR | np.ndarray,
+        graph: Graph | Graphs[Any] | CSR | np.ndarray,
         *,
         pos: np.ndarray | None = None,
         fixed: Sequence[int] | np.ndarray | None = None,
@@ -123,7 +123,7 @@ class LayoutEngine:
 
     def layout(
         self,
-        graph: Graph | Graphs[Any, Any] | CSR | np.ndarray,
+        graph: Graph | Graphs[Any] | CSR | np.ndarray,
         *,
         pos: np.ndarray | None = None,
         fixed: Sequence[int] | np.ndarray | None = None,
@@ -188,14 +188,14 @@ class LayoutEngine:
 
     def _extract_adjacency(
         self,
-        graph: Graph | Graphs[Any, Any] | CSR | np.ndarray,
+        graph: Graph | Graphs[Any] | CSR | np.ndarray,
     ) -> CSR:
         r"""Normalize input `Graph`, `Graphs`, or matrix into a square `CSR`."""
         if isinstance(graph, Graphs):
             adj, _, _ = graph.as_pan_graph(node_mask=self.node_mask)
             return adj
-        if hasattr(graph, "as_graph"):
-            adj, _ = cast(Graph, graph).as_graph(as_bipartite=self.as_bipartite, symmetrize=False)
+        if isinstance(graph, Graph):
+            adj, _ = graph.as_graph(as_bipartite=self.as_bipartite, symmetrize=False)
             return adj
         if isinstance(graph, CSR):
             if graph.ndim != 2 or graph.shape[0] != graph.shape[1]:
