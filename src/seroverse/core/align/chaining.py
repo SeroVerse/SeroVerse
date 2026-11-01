@@ -14,18 +14,19 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from seroverse.core.align.pairwise import PairwiseAligner, PairwiseAlignments
 from seroverse.core.align.seeds import Seeds
-from seroverse.core.collections import BoolArray, Int32Array, RaggedArrayContainer, ScalarView, UInt16Array, UInt32Array
+from seroverse.core.collections import RaggedBatch, View
 from seroverse.core.seq.kmers import BaseKmerIndex
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
+from seroverse.core.types import Types
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
-class Chain(ScalarView):
+class Chain(View):
     r"""Immutable scalar view of a single collinear anchor chain between a query and target sequence.
 
     Attributes:
@@ -50,9 +51,9 @@ class Chain(ScalarView):
     t_start: int
     t_end: int
     is_primary: bool
-    q_pos: Int32Array
-    t_pos: Int32Array
-    spans: UInt16Array
+    q_pos: Types.Int32Array
+    t_pos: Types.Int32Array
+    spans: Types.UInt16Array
 
     def __len__(self) -> int:
         r"""Return the number of anchors in this chain."""
@@ -79,7 +80,7 @@ class Chain(ScalarView):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Chains(RaggedArrayContainer[Chain]):
+class Chains(RaggedBatch[Chain]):
     r"""Ragged Structure-of-Arrays (SoA) batch container for collinear anchor chains.
 
     Stores per-chain summary arrays (`query_indices`, `target_indices`, `scores`, `q_starts`,
@@ -104,19 +105,19 @@ class Chains(RaggedArrayContainer[Chain]):
 
     _ragged_fields: ClassVar[tuple[str, ...]] = ("anchor_q_pos", "anchor_t_pos", "anchor_spans")
 
-    query_indices: UInt32Array
-    target_indices: UInt32Array
-    scores: Int32Array
-    q_starts: Int32Array
-    q_ends: Int32Array
-    t_starts: Int32Array
-    t_ends: Int32Array
-    is_primary: BoolArray
-    offsets: Int32Array
-    lengths: Int32Array
-    anchor_q_pos: Int32Array
-    anchor_t_pos: Int32Array
-    anchor_spans: UInt16Array
+    query_indices: Types.UInt32Array
+    target_indices: Types.UInt32Array
+    scores: Types.Int32Array
+    q_starts: Types.Int32Array
+    q_ends: Types.Int32Array
+    t_starts: Types.Int32Array
+    t_ends: Types.Int32Array
+    is_primary: Types.BoolArray
+    offsets: Types.Int32Array
+    lengths: Types.Int32Array
+    anchor_q_pos: Types.Int32Array
+    anchor_t_pos: Types.Int32Array
+    anchor_spans: Types.UInt16Array
 
     @property
     def total_anchors(self) -> int:
@@ -124,7 +125,7 @@ class Chains(RaggedArrayContainer[Chain]):
         return len(self.anchor_q_pos)
 
     @property
-    def diagonal_offsets(self) -> Int32Array:
+    def diagonal_offsets(self) -> Types.Int32Array:
         r"""Return the 1D array of initial diagonal offsets `q_starts - t_starts` for each chain."""
         return (self.q_starts - self.t_starts).astype(np.int32)
 
@@ -159,7 +160,7 @@ class Chains(RaggedArrayContainer[Chain]):
             spans=spans,
         )
 
-    def extract_sequences(self, queries: Sequences, targets: Sequences) -> tuple[Sequences, Sequences]:
+    def extract_sequences(self, queries: SeqRecords, targets: SeqRecords) -> tuple[SeqRecords, SeqRecords]:
         r"""Extract parallel batches of query and target sequences mapped by this `Chains` batch."""
         return queries[self.query_indices], targets[self.target_indices]
 
@@ -318,8 +319,8 @@ class Chainer:
 
     def align(
         self,
-        queries: Sequences,
-        targets: Sequences,
+        queries: SeqRecords,
+        targets: SeqRecords,
         chains: Chains,
         aligner: PairwiseAligner | None = None,
     ) -> PairwiseAlignments:
@@ -328,8 +329,8 @@ class Chainer:
         Uses WFA2 for inter-anchor gaps and adaptive block X-drop extension at chain ends.
 
         Args:
-            queries (Sequences): Query sequences collection.
-            targets (Sequences): Target sequences collection.
+            queries (SeqRecords): Query sequences collection.
+            targets (SeqRecords): Target sequences collection.
             chains (Chains): Collinear chains to align at the base/residue level.
             aligner (PairwiseAligner | None): Optional `PairwiseAligner` providing scoring matrix and gap penalties.
 
@@ -341,9 +342,9 @@ class Chainer:
 
     def search(
         self,
-        queries: Sequences,
+        queries: SeqRecords,
         index: BaseKmerIndex,
-        targets: Sequences,
+        targets: SeqRecords,
         aligner: PairwiseAligner | None = None,
         *,
         min_seed_score: int = 1,
@@ -356,9 +357,9 @@ class Chainer:
         WFA2 + adaptive block X-drop base alignment.
 
         Args:
-            queries (Sequences): Query sequences.
+            queries (SeqRecords): Query sequences.
             index (BaseKmerIndex): Sorted k-mer / syncmer / randstrobe index built on `targets`.
-            targets (Sequences): Target sequences.
+            targets (SeqRecords): Target sequences.
             aligner (PairwiseAligner | None): Optional `PairwiseAligner` for scoring parameters.
                 Defaults to `PairwiseAligner(matrix=index._default_matrix())`.
             min_seed_score (int): Minimum anchor hits per `(query, target)` pair before chaining. Defaults to 1.
@@ -383,12 +384,12 @@ class Chainer:
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True)
+@Types.njit
 def _is_sorted_anchors(
-    q_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    t_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    t_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
+    q_indices: Types.UInt32Array,
+    t_indices: Types.UInt32Array,
+    t_pos: Types.Int32Array,
+    q_pos: Types.Int32Array,
 ) -> bool:
     r"""Check whether anchors are sorted by `(query_index, target_index, t_pos, q_pos)`."""
     n = len(q_indices)
@@ -409,13 +410,13 @@ def _is_sorted_anchors(
     return True
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _find_pair_runs(
-    q_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    t_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
+    q_indices: Types.UInt32Array,
+    t_indices: Types.UInt32Array,
 ) -> tuple[
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
+    Types.Int32Array,
+    Types.Int32Array,
 ]:
     r"""Find contiguous `[start, end)` run boundaries for each `(query_index, target_index)` pair."""
     n = len(q_indices)
@@ -440,13 +441,13 @@ def _find_pair_runs(
     return starts, ends
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _chain_pairs_kernel(
-    q_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    spans: np.ndarray[tuple[int], np.dtype[np.uint16]],
-    pair_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    pair_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
+    q_pos: Types.Int32Array,
+    t_pos: Types.Int32Array,
+    spans: Types.UInt16Array,
+    pair_starts: Types.Int32Array,
+    pair_ends: Types.Int32Array,
     max_dist_x: int,
     max_dist_y: int,
     max_band: int,
@@ -454,12 +455,12 @@ def _chain_pairs_kernel(
     min_score: int,
     gap_scale: float,
     max_skip: int,
-    tmp_c_score: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_c_len: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_c_a_start: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_anchor_idx: np.ndarray[tuple[int], np.dtype[np.int32]],
-    pair_chain_counts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    pair_anchor_counts: np.ndarray[tuple[int], np.dtype[np.int32]],
+    tmp_c_score: Types.Int32Array,
+    tmp_c_len: Types.Int32Array,
+    tmp_c_a_start: Types.Int32Array,
+    tmp_anchor_idx: Types.Int32Array,
+    pair_chain_counts: Types.Int32Array,
+    pair_anchor_counts: Types.Int32Array,
 ) -> None:
     r"""Parallel `minimap2`-style concave-gap collinear chaining DP and non-overlapping chain backtracking."""
     n_anchors = len(q_pos)
@@ -568,33 +569,33 @@ def _chain_pairs_kernel(
         pair_anchor_counts[p_idx] = a_write - start
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _compact_chains_kernel(
-    q_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    t_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    q_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    spans: np.ndarray[tuple[int], np.dtype[np.uint16]],
-    pair_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    pair_chain_counts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    chain_indptr: np.ndarray[tuple[int], np.dtype[np.int32]],
-    anchor_indptr: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_c_score: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_c_len: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_c_a_start: np.ndarray[tuple[int], np.dtype[np.int32]],
-    tmp_anchor_idx: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    out_t: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    out_scores: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_aq: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_at: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_asp: np.ndarray[tuple[int], np.dtype[np.uint16]],
+    q_indices: Types.UInt32Array,
+    t_indices: Types.UInt32Array,
+    q_pos: Types.Int32Array,
+    t_pos: Types.Int32Array,
+    spans: Types.UInt16Array,
+    pair_starts: Types.Int32Array,
+    pair_chain_counts: Types.Int32Array,
+    chain_indptr: Types.Int32Array,
+    anchor_indptr: Types.Int32Array,
+    tmp_c_score: Types.Int32Array,
+    tmp_c_len: Types.Int32Array,
+    tmp_c_a_start: Types.Int32Array,
+    tmp_anchor_idx: Types.Int32Array,
+    out_q: Types.UInt32Array,
+    out_t: Types.UInt32Array,
+    out_scores: Types.Int32Array,
+    out_q_starts: Types.Int32Array,
+    out_q_ends: Types.Int32Array,
+    out_t_starts: Types.Int32Array,
+    out_t_ends: Types.Int32Array,
+    out_offsets: Types.Int32Array,
+    out_lengths: Types.Int32Array,
+    out_aq: Types.Int32Array,
+    out_at: Types.Int32Array,
+    out_asp: Types.UInt16Array,
 ) -> None:
     r"""Compact per-pair chains and anchor slices into flat RaggedArrayContainer arrays."""
     n_pairs = len(pair_starts)
@@ -636,14 +637,14 @@ def _compact_chains_kernel(
             a_out_curr += cnt
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _classify_primary_chains_kernel(
-    chain_q: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    chain_scores: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
+    chain_q: Types.UInt32Array,
+    chain_scores: Types.Int32Array,
+    q_starts: Types.Int32Array,
+    q_ends: Types.Int32Array,
     mask_level: float,
-) -> np.ndarray[tuple[int], np.dtype[np.bool_]]:
+) -> Types.BoolArray:
     r"""Classify chains as primary vs secondary based on query interval overlap (`mask_level`)."""
     n = len(chain_q)
     is_primary = np.ones(n, dtype=np.bool_)

@@ -33,7 +33,7 @@ def _():
     from seroverse.core.io.fasta import FastaReader
     from seroverse.core.seq.alphabet import Alphabet
     from seroverse.core.seq.kmers import FracMinHashIndex, RandstrobeIndex
-    from seroverse.core.seq.seq import Sequences
+    from seroverse.core.seq.seq import SeqRecords
 
     return (
         Alphabet,
@@ -45,7 +45,7 @@ def _():
         Path,
         RandstrobeIndex,
         Seeds,
-        Sequences,
+        SeqRecords,
         SubstitutionMatrix,
         asyncio,
         mo,

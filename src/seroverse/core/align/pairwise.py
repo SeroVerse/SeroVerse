@@ -21,13 +21,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from seroverse.core.align.score import SubstitutionMatrix, _score_ungapped_diagonal
 from seroverse.core.align.seeds import Seeds
-from seroverse.core.collections import BatchedContainer, Float32Array, Int32Array, ScalarView
+from seroverse.core.collections import Batch, View
 from seroverse.core.seq.alphabet import Alphabet
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
+from seroverse.core.types import Types
 
 if TYPE_CHECKING:
     from seroverse.core.align.chaining import Chains
@@ -38,7 +39,7 @@ _INF = np.int32(-1_000_000_000)  # Safe negative infinity for int32 DP arithmeti
 
 # Classes --------------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
-class PairwiseAlignment(ScalarView):
+class PairwiseAlignment(View):
     r"""A lightweight, immutable container for the results of a single pairwise sequence alignment.
 
     This class holds summary statistics and coordinates for an alignment between a single query
@@ -87,7 +88,7 @@ class PairwiseAlignment(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class PairwiseAlignments(BatchedContainer[PairwiseAlignment]):
+class PairwiseAlignments(Batch[PairwiseAlignment]):
     r"""A high-performance SoA container for the results of multiple pairwise alignments.
 
     This class stores alignment statistics in a Structure-of-Arrays (SoA) layout using 1D NumPy arrays.
@@ -103,17 +104,17 @@ class PairwiseAlignments(BatchedContainer[PairwiseAlignment]):
         t_ends (Int32Array): 1D array of target end coordinates.
     """
 
-    scores: Int32Array
-    matches: Int32Array
-    mismatches: Int32Array
-    gaps: Int32Array
-    q_starts: Int32Array
-    q_ends: Int32Array
-    t_starts: Int32Array
-    t_ends: Int32Array
+    scores: Types.Int32Array
+    matches: Types.Int32Array
+    mismatches: Types.Int32Array
+    gaps: Types.Int32Array
+    q_starts: Types.Int32Array
+    q_ends: Types.Int32Array
+    t_starts: Types.Int32Array
+    t_ends: Types.Int32Array
 
     @property
-    def pidents(self) -> Float32Array:
+    def pidents(self) -> Types.Float32Array:
         r"""Calculate percent identity for all alignments in the batch in a vectorized manner.
 
         Returns:
@@ -122,7 +123,7 @@ class PairwiseAlignments(BatchedContainer[PairwiseAlignment]):
         total = self.matches + self.mismatches + self.gaps
         return np.divide(self.matches * 100.0, total, out=np.zeros(len(self), dtype=np.float32), where=total > 0)
 
-    def bitscores(self, matrix: SubstitutionMatrix = SubstitutionMatrix.BLOSUM62) -> Float32Array:
+    def bitscores(self, matrix: SubstitutionMatrix = SubstitutionMatrix.BLOSUM62) -> Types.Float32Array:
         r"""Calculate Karlin-Altschul bitscores for all alignments in the batch using `matrix`.
 
         Args:
@@ -165,12 +166,12 @@ class PairwiseAligner:
     block_size: int = 32
     x_drop: int = 50
 
-    def __call__(self, queries: Sequences, targets: Sequences, seeds: Seeds | None = None) -> PairwiseAlignments:
+    def __call__(self, queries: SeqRecords, targets: SeqRecords, seeds: Seeds | None = None) -> PairwiseAlignments:
         r"""Perform pairwise alignment of query and target sequences.
 
         Args:
-            queries (Sequences): Collection of query sequences.
-            targets (Sequences): Collection of target sequences (must match query batch size).
+            queries (SeqRecords): Collection of query sequences.
+            targets (SeqRecords): Collection of target sequences (must match query batch size).
             seeds (Seeds | None): Optional alignment seeds guiding diagonal alignment.
 
         Returns:
@@ -289,12 +290,12 @@ class PairwiseAligner:
             out_t_ends,
         )
 
-    def align_seeds(self, queries: Sequences, targets: Sequences, seeds: Seeds) -> PairwiseAlignments:
+    def align_seeds(self, queries: SeqRecords, targets: SeqRecords, seeds: Seeds) -> PairwiseAlignments:
         r"""Convenience method to extract and align specific sequence pairs mapped by seeds.
 
         Args:
-            queries (Sequences): Full collection of query sequences.
-            targets (Sequences): Full collection of target sequences.
+            queries (SeqRecords): Full collection of query sequences.
+            targets (SeqRecords): Full collection of target sequences.
             seeds (Seeds): Seed collection mapping specific query sequences to target sequences.
 
         Returns:
@@ -305,15 +306,15 @@ class PairwiseAligner:
         paired_queries, paired_targets = seeds.extract_sequences(queries, targets)
         return self(paired_queries, paired_targets, seeds)
 
-    def align_chains(self, queries: Sequences, targets: Sequences, chains: Chains) -> PairwiseAlignments:
+    def align_chains(self, queries: SeqRecords, targets: SeqRecords, chains: Chains) -> PairwiseAlignments:
         r"""Perform piecewise anchor-guided base alignment for a batch of collinear [`Chains`][seroverse.core.align.chaining.Chains].
 
         Aligns inter-anchor gaps using pinned Affine Wavefront Alignment (WFA2) and extends
         left and right chain ends using adaptive block X-drop Smith-Waterman-Gotoh.
 
         Args:
-            queries (Sequences): Full collection of query sequences.
-            targets (Sequences): Full collection of target sequences.
+            queries (SeqRecords): Full collection of query sequences.
+            targets (SeqRecords): Full collection of target sequences.
             chains (Chains): Collinear anchor chains mapping query sequences to target sequences.
 
         Returns:
@@ -374,8 +375,8 @@ class PairwiseAligner:
 
     def prefilter(
         self,
-        queries: Sequences,
-        targets: Sequences | None = None,
+        queries: SeqRecords,
+        targets: SeqRecords | None = None,
         *,
         min_ungapped_score: int = 42,
         min_coverage: float = 0.0,
@@ -388,7 +389,7 @@ class PairwiseAligner:
         evaluates ungapped diagonal scores using `self.matrix` on shared 4-mer diagonals.
 
         Args:
-            queries (Sequences): Query sequences.
+            queries (SeqRecords): Query sequences.
             targets (Sequences | None): Target sequences. If `None`, performs self-search on `queries`.
             min_ungapped_score (int): Minimum local ungapped diagonal score to retain a pair. Defaults to `42`.
             min_coverage (float): Minimum length ratio $\min(L_q, L_t) / \max(L_q, L_t)$. Defaults to `0.0`.
@@ -424,8 +425,8 @@ class PairwiseAligner:
 
     def search(
         self,
-        queries: Sequences,
-        targets: Sequences | None = None,
+        queries: SeqRecords,
+        targets: SeqRecords | None = None,
         *,
         min_ungapped_score: int = 42,
         min_coverage: float = 0.0,
@@ -435,7 +436,7 @@ class PairwiseAligner:
         r"""Execute a two-stage MMseqs2-style prefilter followed by Smith-Waterman-Gotoh / WFA alignment.
 
         Args:
-            queries (Sequences): Query sequences.
+            queries (SeqRecords): Query sequences.
             targets (Sequences | None): Target sequences. If `None`, performs self-search on `queries`.
             min_ungapped_score (int): Minimum ungapped diagonal score threshold for Stage 1. Defaults to `42`.
             min_coverage (float): Minimum sequence length ratio filter. Defaults to `0.0`.
@@ -465,13 +466,13 @@ class PairwiseAligner:
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------
-@njit(nogil=True, cache=True)
+@Types.njit
 def _build_mmseqs12_k4_csr(
-    seqs_data: np.ndarray,
-    offsets: np.ndarray,
-    lengths: np.ndarray,
-    lut: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    seqs_data: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
+    lut: Types.UInt8Array,
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int16Array]:
     r"""Build a direct $12^4 = 20,736$-bucket CSR inverted index of 4-mers (`Alphabet.MMSEQS12` or `Alphabet.DNA`)."""
     n_buckets = 20736
     counts = np.zeros(n_buckets + 1, dtype=np.int32)
@@ -509,26 +510,26 @@ def _build_mmseqs12_k4_csr(
     return indptr, post_seq, post_pos
 
 
-@njit(parallel=True, nogil=True, cache=True)
+@Types.njit(parallel=True)
 def _mmseqs12_k4_ungapped_prefilter(
-    q_data: np.ndarray,
-    q_offsets: np.ndarray,
-    q_lengths: np.ndarray,
-    t_data: np.ndarray,
-    t_offsets: np.ndarray,
-    t_lengths: np.ndarray,
+    q_data: Types.UInt8Array,
+    q_offsets: Types.Int32Array,
+    q_lengths: Types.Int32Array,
+    t_data: Types.UInt8Array,
+    t_offsets: Types.Int32Array,
+    t_lengths: Types.Int32Array,
     min_cov: float,
     min_ungapped_score: int,
-    lut: np.ndarray,
-    matrix: np.ndarray,
+    lut: Types.UInt8Array,
+    matrix: Types.Int8Array2D,
     upper_triangle: bool = True,
 ) -> tuple[
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
+    Types.UInt32Array,
+    Types.UInt32Array,
+    Types.UInt32Array,
+    Types.Int32Array,
+    Types.Int32Array,
+    Types.Int32Array,
 ]:
     r"""MMseqs2-style reduced-alphabet 4-mer CSR + ungapped diagonal prefilter."""
     indptr, post_seq, post_pos = _build_mmseqs12_k4_csr(t_data, t_offsets, t_lengths, lut)
@@ -631,11 +632,11 @@ def _mmseqs12_k4_ungapped_prefilter(
     return out_q, out_t, out_scores, out_diags, out_qp, out_tp
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _banded_gotoh_pair(
-    seq1: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    seq2: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    seq1: Types.UInt8Array,
+    seq2: Types.UInt8Array,
+    matrix: Types.Int8Array2D,
     k: int,
     gap_open: int,
     gap_extend: int,
@@ -770,11 +771,11 @@ def _banded_gotoh_pair(
     return max_score, matches, mismatches, gaps, i, end_i, j, end_j
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _block_gotoh_pair(
-    seq1: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    seq2: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    seq1: Types.UInt8Array,
+    seq2: Types.UInt8Array,
+    matrix: Types.Int8Array2D,
     k: int,
     block_size: int,
     gap_open: int,
@@ -942,11 +943,11 @@ def _block_gotoh_pair(
     return int(max_score), matches, mismatches, gaps, i, end_i, j, end_j
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _block_xdrop_extend(
-    seq1: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    seq2: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    seq1: Types.UInt8Array,
+    seq2: Types.UInt8Array,
+    matrix: Types.Int8Array2D,
     block_size: int,
     gap_open: int,
     gap_extend: int,
@@ -1140,11 +1141,11 @@ def _block_xdrop_extend(
     return int(max_score), matches, mismatches, gaps, max_i, max_j
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _wfa_align_pair(
-    seq1: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    seq2: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    seq1: Types.UInt8Array,
+    seq2: Types.UInt8Array,
+    matrix: Types.Int8Array2D,
     k: int,
     block_size: int,
     gap_open: int,
@@ -1503,28 +1504,28 @@ def _wfa_align_pair(
     return best_sc, matches, mismatches, gaps, q_start, q_end, t_start, t_end
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _batched_banded_gotoh(
-    q_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    q_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    t_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    q_data: Types.UInt8Array,
+    q_offsets: Types.Int32Array,
+    q_lengths: Types.Int32Array,
+    t_data: Types.UInt8Array,
+    t_offsets: Types.Int32Array,
+    t_lengths: Types.Int32Array,
+    matrix: Types.Int8Array2D,
     k: int,
     gap_open: int,
     gap_extend: int,
     is_seeded: bool,
-    diagonal_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_scores: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_matches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_mismatches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_gaps: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
+    diagonal_offsets: Types.Int32Array,
+    out_scores: Types.Int32Array,
+    out_matches: Types.Int32Array,
+    out_mismatches: Types.Int32Array,
+    out_gaps: Types.Int32Array,
+    out_q_starts: Types.Int32Array,
+    out_q_ends: Types.Int32Array,
+    out_t_starts: Types.Int32Array,
+    out_t_ends: Types.Int32Array,
 ) -> None:
     r"""Numba parallel kernel for batched static-band Smith-Waterman-Gotoh pairwise alignment."""
     for idx in prange(len(q_offsets)):  # type: ignore[not-iterable]
@@ -1550,30 +1551,30 @@ def _batched_banded_gotoh(
         out_t_ends[idx] = te
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _batched_block_gotoh(
-    q_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    q_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    t_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    q_data: Types.UInt8Array,
+    q_offsets: Types.Int32Array,
+    q_lengths: Types.Int32Array,
+    t_data: Types.UInt8Array,
+    t_offsets: Types.Int32Array,
+    t_lengths: Types.Int32Array,
+    matrix: Types.Int8Array2D,
     k: int,
     block_size: int,
     gap_open: int,
     gap_extend: int,
     x_drop: int,
     is_seeded: bool,
-    diagonal_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_scores: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_matches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_mismatches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_gaps: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
+    diagonal_offsets: Types.Int32Array,
+    out_scores: Types.Int32Array,
+    out_matches: Types.Int32Array,
+    out_mismatches: Types.Int32Array,
+    out_gaps: Types.Int32Array,
+    out_q_starts: Types.Int32Array,
+    out_q_ends: Types.Int32Array,
+    out_t_starts: Types.Int32Array,
+    out_t_ends: Types.Int32Array,
 ) -> None:
     r"""Numba parallel kernel for batched adaptive block-shifting Smith-Waterman-Gotoh pairwise alignment."""
     for idx in prange(len(q_offsets)):  # type: ignore[not-iterable]
@@ -1601,30 +1602,30 @@ def _batched_block_gotoh(
         out_t_ends[idx] = te
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _batched_wfa(
-    q_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    q_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    t_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    q_data: Types.UInt8Array,
+    q_offsets: Types.Int32Array,
+    q_lengths: Types.Int32Array,
+    t_data: Types.UInt8Array,
+    t_offsets: Types.Int32Array,
+    t_lengths: Types.Int32Array,
+    matrix: Types.Int8Array2D,
     k: int,
     block_size: int,
     gap_open: int,
     gap_extend: int,
     x_drop: int,
     is_seeded: bool,
-    diagonal_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_scores: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_matches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_mismatches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_gaps: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
+    diagonal_offsets: Types.Int32Array,
+    out_scores: Types.Int32Array,
+    out_matches: Types.Int32Array,
+    out_mismatches: Types.Int32Array,
+    out_gaps: Types.Int32Array,
+    out_q_starts: Types.Int32Array,
+    out_q_ends: Types.Int32Array,
+    out_t_starts: Types.Int32Array,
+    out_t_ends: Types.Int32Array,
 ) -> None:
     r"""Numba parallel kernel for batched Affine Wavefront Alignment (WFA2)."""
     for idx in prange(len(q_offsets)):  # type: ignore[not-iterable]
@@ -1653,34 +1654,34 @@ def _batched_wfa(
         out_t_ends[idx] = te
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _align_chains_kernel(
-    q_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    q_seq_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_seq_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    t_seq_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_seq_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    chain_q_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    chain_t_indices: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    chain_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    chain_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    anchor_q_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    anchor_t_pos: np.ndarray[tuple[int], np.dtype[np.int32]],
-    anchor_spans: np.ndarray[tuple[int], np.dtype[np.uint16]],
-    matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    q_data: Types.UInt8Array,
+    q_seq_offsets: Types.Int32Array,
+    q_seq_lengths: Types.Int32Array,
+    t_data: Types.UInt8Array,
+    t_seq_offsets: Types.Int32Array,
+    t_seq_lengths: Types.Int32Array,
+    chain_q_indices: Types.UInt32Array,
+    chain_t_indices: Types.UInt32Array,
+    chain_offsets: Types.Int32Array,
+    chain_lengths: Types.Int32Array,
+    anchor_q_pos: Types.Int32Array,
+    anchor_t_pos: Types.Int32Array,
+    anchor_spans: Types.UInt16Array,
+    matrix: Types.Int8Array2D,
     block_size: int,
     gap_open: int,
     gap_extend: int,
     x_drop: int,
-    out_scores: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_matches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_mismatches: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_gaps: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_q_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_starts: np.ndarray[tuple[int], np.dtype[np.int32]],
-    out_t_ends: np.ndarray[tuple[int], np.dtype[np.int32]],
+    out_scores: Types.Int32Array,
+    out_matches: Types.Int32Array,
+    out_mismatches: Types.Int32Array,
+    out_gaps: Types.Int32Array,
+    out_q_starts: Types.Int32Array,
+    out_q_ends: Types.Int32Array,
+    out_t_starts: Types.Int32Array,
+    out_t_ends: Types.Int32Array,
 ) -> None:
     r"""Piecewise anchor-guided alignment using WFA2 for inter-anchor gaps and block X-drop at chain ends."""
     n_chains = len(chain_offsets)

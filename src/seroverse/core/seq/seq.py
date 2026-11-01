@@ -1,39 +1,18 @@
-r"""Biological sequence data structures, SoA containers, and translation utilities.
-
-This module provides high-performance data structures for storing, manipulating, and
-translating biological sequences (DNA, RNA, protein). Sequences are stored either as individual
-immutable [`Sequence`][seroverse.core.seq.seq.Sequence] instances or as contiguous, flat arrays in
-[`Sequences`][seroverse.core.seq.seq.Sequences] Structure-of-Arrays (SoA) containers.
-
-Key Classes:
-    - [`Sequence`][seroverse.core.seq.seq.Sequence]: Immutable container for a single sequence record.
-    - [`Sequences`][seroverse.core.seq.seq.Sequences]: Memory-efficient, Numba-accelerated SoA container.
-    - [`GeneticCode`][seroverse.core.seq.alphabet.GeneticCode]: NCBI genetic code translator.
-"""
-
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, overload
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
-from seroverse.core.collections import (
-    BoolArray,
-    BytesArray,
-    Int8Array,
-    Int32Array,
-    RaggedArrayContainer,
-    ScalarView,
-    UInt8Array,
-    UInt64Array,
-)
+from seroverse.core.collections import RaggedBatch, View
 from seroverse.core.seq.alphabet import Alphabet, GeneticCode
+from seroverse.core.types import Types
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
-class Sequence(ScalarView):
+class SeqRecord(View):
     r"""A simple, immutable container for a single biological sequence.
 
     Attributes:
@@ -75,14 +54,16 @@ class Sequence(ScalarView):
         Returns:
             bytes: FASTA formatted byte representation of the record.
         """
-        return b">%s\n%s\n" % (self.id, self.seq)
+        from seroverse.core.io.fasta import FastaWriter
+
+        return FastaWriter.to_bytes(self)
 
     def translate(
         self,
         code: GeneticCode = GeneticCode.bacterial,
         frame: int = 0,
         to_stop: bool = False,
-    ) -> Sequence:
+    ) -> SeqRecord:
         r"""Translate a nucleotide sequence into a protein sequence using the specified genetic code.
 
         Args:
@@ -91,13 +72,13 @@ class Sequence(ScalarView):
             to_stop (bool): If True, truncates translation at the first stop codon (*). Defaults to False.
 
         Returns:
-            Sequence: New sequence record containing the translated protein sequence.
+            SeqRecord: New sequence record containing the translated protein sequence.
         """
-        return Sequence(self.id, code.translate(self.seq, frame=frame, to_stop=to_stop).tobytes())
+        return SeqRecord(self.id, code.translate(self.seq, frame=frame, to_stop=to_stop).tobytes())
 
 
 @dataclass(frozen=True, slots=True)
-class Sequences(RaggedArrayContainer[Sequence]):
+class SeqRecords(RaggedBatch[SeqRecord]):
     r"""A high-performance SoA container for biological sequences.
 
     Stores multiple sequences in a flat, contiguous memory layout using a 1D NumPy array
@@ -105,24 +86,24 @@ class Sequences(RaggedArrayContainer[Sequence]):
     of offsets and lengths.
 
     Attributes:
-        ids (BytesArray): 1D byte string array of identifiers for each sequence.
-        seqs (UInt8Array): Single flat 1D array containing all sequence byte data concatenated.
-        offsets (Int32Array): 1D array of start indices in `seqs`.
-        lengths (Int32Array): 1D array of sequence lengths.
+        ids (Types.BytesArray): 1D byte string array of identifiers for each sequence.
+        seqs (Types.UInt8Array): Single flat 1D array containing all sequence byte data concatenated.
+        offsets (Types.Int32Array): 1D array of start indices in `seqs`.
+        lengths (Types.Int32Array): 1D array of sequence lengths.
     """
 
     _ragged_fields: ClassVar[tuple[str, ...]] = ("seqs",)
 
-    ids: BytesArray
-    seqs: UInt8Array  # concatenated sequences
-    offsets: Int32Array  # start index per sequence
-    lengths: Int32Array  # length per sequence
+    ids: Types.BytesArray
+    seqs: Types.UInt8Array  # concatenated sequences
+    offsets: Types.Int32Array  # start index per sequence
+    lengths: Types.Int32Array  # length per sequence
     _lookup_cache: dict[bytes, int] | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
-    def _get_scalar(self, idx: int) -> Sequence:
+    def _get_scalar(self, idx: int) -> SeqRecord:
         r"""Materialize the [`Sequence`][seroverse.core.seq.seq.Sequence] at index `idx`."""
         offset_val = int(self.offsets[idx])
-        return Sequence(
+        return SeqRecord(
             self.ids[idx],
             bytes(self.seqs.data[offset_val : offset_val + int(self.lengths[idx])]),
         )
@@ -137,39 +118,29 @@ class Sequences(RaggedArrayContainer[Sequence]):
         Returns:
             bytes: Complete FASTA-formatted byte string containing all sequences.
         """
-        if len(self.ids) == 0:
-            return b""
+        from seroverse.core.io.fasta import FastaWriter
 
-        mv = self.seqs.data
-        if use_indices:
-            return b"".join(
-                b">%d\n%s\n" % (i, bytes(mv[o : o + length_val]))
-                for i, (o, length_val) in enumerate(zip(self.offsets, self.lengths, strict=False))
-            )
-        return b"".join(
-            b">%s\n%s\n" % (name, bytes(mv[o : o + length_val]))
-            for name, o, length_val in zip(self.ids, self.offsets, self.lengths, strict=False)
-        )
+        return FastaWriter.to_bytes(self, use_indices=use_indices)
 
     @property
-    def internal_stops(self) -> BoolArray:
+    def internal_stops(self) -> Types.BoolArray:
         r"""Vectorized check for internal stop codons in protein sequences.
 
         Scans each sequence for the stop codon character ('*') before the final position using a Numba kernel.
 
         Returns:
-            BoolArray: A 1D boolean array where True indicates presence of an internal stop.
+            Types.BoolArray: A 1D boolean array where True indicates presence of an internal stop.
         """
         return _internal_stops_kernel(self.seqs, self.offsets, self.lengths)
 
-    def unique(self) -> Sequences:
+    def unique(self) -> SeqRecords:
         r"""Return a new Sequences container containing only unique sequences.
 
         Uses a Numba-accelerated 64-bit FNV-1a hash to identify unique sequences while preserving
         first-occurrence order.
 
         Returns:
-            Sequences: A new container with duplicate sequences removed.
+            SeqRecords: A new container with duplicate sequences removed.
         """
         if len(self) <= 1:
             return self
@@ -184,22 +155,22 @@ class Sequences(RaggedArrayContainer[Sequence]):
     def index(self, key_or_keys: bytes | np.bytes_) -> int: ...
 
     @overload
-    def index(self, key_or_keys: BytesArray | Iterable[bytes]) -> Int32Array: ...
+    def index(self, key_or_keys: Types.BytesArray | Iterable[bytes]) -> Types.Int32Array: ...
 
     def index(
         self,
-        key_or_keys: bytes | np.bytes_ | BytesArray | Iterable[bytes],
-    ) -> int | Int32Array:
-        r"""Resolve byte identifier(s) to 0-based integer index or `Int32Array` of indices.
+        key_or_keys: bytes | np.bytes_ | Types.BytesArray | Iterable[bytes],
+    ) -> int | Types.Int32Array:
+        r"""Resolve byte identifier(s) to 0-based integer index or `Types.Int32Array` of indices.
 
         Builds and caches an $O(1)$ hash map on first lookup (preserving first-occurrence index for duplicate IDs).
 
         Args:
-            key_or_keys (bytes | np.bytes_ | BytesArray | Iterable[bytes]): Single sequence ID
+            key_or_keys (bytes | np.bytes_ | Types.BytesArray | Iterable[bytes]): Single sequence ID
                 or array/iterable of IDs.
 
         Returns:
-            int | Int32Array: Integer index for scalar queries or 1D `int32` array of indices for batch queries.
+            int | Types.Int32Array: Integer index for scalar queries or 1D `int32` array of indices for batch queries.
 
         Raises:
             KeyError: If any requested sequence identifier is not found.
@@ -233,7 +204,7 @@ class Sequences(RaggedArrayContainer[Sequence]):
         return out
 
     @overload
-    def __getitem__(self, item: int | np.integer[Any] | bytes | np.bytes_) -> Sequence: ...
+    def __getitem__(self, item: int | np.integer[Any] | bytes | np.bytes_) -> SeqRecord: ...
 
     @overload
     def __getitem__(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Self: ...
@@ -242,12 +213,12 @@ class Sequences(RaggedArrayContainer[Sequence]):
     def __getitem__(
         self,
         item: int | np.integer[Any] | slice | np.ndarray[Any, Any] | list[Any] | bytes | np.bytes_,
-    ) -> Sequence | Self: ...
+    ) -> SeqRecord | Self: ...
 
     def __getitem__(
         self,
         item: int | np.integer[Any] | slice | np.ndarray[Any, Any] | list[Any] | bytes | np.bytes_,
-    ) -> Sequence | Self:
+    ) -> SeqRecord | Self:
         r"""Access sequences by index, slice, boolean mask, or byte identifier(s)."""
         if isinstance(item, (bytes, np.bytes_)):
             return self._get_scalar(self.index(item))
@@ -261,17 +232,17 @@ class Sequences(RaggedArrayContainer[Sequence]):
     def from_bytes(
         cls,
         seqs: list[bytes] | tuple[bytes, ...] | Iterable[bytes],
-        ids: tuple[bytes, ...] | BytesArray | list[bytes] | None = None,
-    ) -> Sequences:
+        ids: tuple[bytes, ...] | Types.BytesArray | list[bytes] | None = None,
+    ) -> SeqRecords:
         r"""Construct Sequences from a collection of raw sequence byte strings.
 
         Args:
             seqs (Iterable[bytes]): Sequence byte strings.
-            ids (tuple[bytes, ...] | BytesArray | list[bytes] | None): Sequence identifiers.
+            ids (tuple[bytes, ...] | Types.BytesArray | list[bytes] | None): Sequence identifiers.
                 Defaults to integer byte strings (b"0", b"1", ...).
 
         Returns:
-            Sequences: Newly constructed sequences container.
+            SeqRecords: Newly constructed sequences container.
         """
         seqs_list = list(seqs) if not isinstance(seqs, list) else seqs
         if not seqs_list:
@@ -293,12 +264,12 @@ class Sequences(RaggedArrayContainer[Sequence]):
 
     def extract(
         self,
-        indices: Int32Array,
-        starts: Int32Array,
-        ends: Int32Array,
-        strands: Int8Array,
-        new_ids: tuple[bytes, ...] | BytesArray | list[bytes] | None = None,
-    ) -> Sequences:
+        indices: Types.Int32Array,
+        starts: Types.Int32Array,
+        ends: Types.Int32Array,
+        strands: Types.Int8Array,
+        new_ids: tuple[bytes, ...] | Types.BytesArray | list[bytes] | None = None,
+    ) -> SeqRecords:
         r"""Vectorized sub-sequence extraction from the batch.
 
         Handles coordinates and reverse-complementation across multiple sequences in parallel using Numba.
@@ -312,7 +283,7 @@ class Sequences(RaggedArrayContainer[Sequence]):
                 If None, auto-generates names.
 
         Returns:
-            Sequences: New collection of extracted sub-sequences.
+            SeqRecords: New collection of extracted sub-sequences.
         """
         if len(indices) == 0:
             return self.empty()
@@ -338,39 +309,39 @@ class Sequences(RaggedArrayContainer[Sequence]):
             strands,
             Alphabet.DNA.complement_lut,
         )
-        return Sequences(new_ids_arr, out_seqs, offsets, lengths)
+        return SeqRecords(new_ids_arr, out_seqs, offsets, lengths)
 
-    def encode(self, alphabet: Alphabet) -> UInt8Array:
+    def encode(self, alphabet: Alphabet) -> Types.UInt8Array:
         r"""Encode sequence bytes into dense integer values [0..K-1] according to the given Alphabet.
 
         Args:
             alphabet (Alphabet): Alphabet containing precomputed kmer lookup table.
 
         Returns:
-            UInt8Array: Array of dense integer indices.
+            Types.UInt8Array: Array of dense integer indices.
         """
         return alphabet.encode(self.seqs)
 
-    def reduce(self, alphabet: Alphabet) -> Sequences:
+    def reduce(self, alphabet: Alphabet) -> SeqRecords:
         r"""Vectorized reduction of sequence characters using a reduced Alphabet.
 
         Args:
             alphabet (Alphabet): Reduced alphabet containing precomputed lookup tables (e.g. `Alphabet.MMSEQS12`).
 
         Returns:
-            Sequences: New collection containing reduced ASCII sequence bytes.
+            SeqRecords: New collection containing reduced ASCII sequence bytes.
         """
         if len(self) == 0:
             return self.empty()
         reduced_seqs = alphabet.reduce(self.seqs)
-        return Sequences(self.ids, reduced_seqs, self.offsets.copy(), self.lengths.copy())  # type: ignore
+        return SeqRecords(self.ids, reduced_seqs, self.offsets.copy(), self.lengths.copy())  # type: ignore
 
     def translate(
         self,
         code: GeneticCode = GeneticCode.bacterial,
-        frames: Int8Array | None = None,
+        frames: Types.Int8Array | None = None,
         to_stop: bool = False,
-    ) -> Sequences:
+    ) -> SeqRecords:
         r"""Vectorized translation of nucleotide sequences into protein sequences.
 
         Translates sequences according to the provided [`GeneticCode`][seroverse.core.seq.alphabet.GeneticCode]
@@ -378,19 +349,19 @@ class Sequences(RaggedArrayContainer[Sequence]):
 
         Args:
             code (GeneticCode): Genetic code translation table to use. Defaults to `GeneticCode.bacterial`.
-            frames (Int8Array | None): Reading frame offsets (0, 1, or 2) per sequence.
+            frames (Types.Int8Array | None): Reading frame offsets (0, 1, or 2) per sequence.
                 Defaults to frame 0 for all.
             to_stop (bool): If True, truncates translation at the first stop codon (*). Defaults to False.
 
         Returns:
-            Sequences: New collection containing translated protein sequences.
+            SeqRecords: New collection containing translated protein sequences.
         """
         if len(self) == 0:
             return self.empty()
         out_seqs, offsets, lengths = code.translate_ragged(
             self.seqs, self.offsets, self.lengths, frames=frames, to_stop=to_stop
         )
-        return Sequences(self.ids, out_seqs, offsets, lengths)
+        return SeqRecords(self.ids, out_seqs, offsets, lengths)
 
     @classmethod
     def random(
@@ -438,21 +409,21 @@ class Sequences(RaggedArrayContainer[Sequence]):
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _hash_sequences_kernel(
-    seqs: UInt8Array,
-    offsets: Int32Array,
-    lengths: Int32Array,
-) -> UInt64Array:
+    seqs: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
+) -> Types.UInt64Array:
     r"""Compute a 64-bit FNV-1a hash for each sequence in parallel.
 
     Args:
-        seqs (UInt8Array): Concatenated sequence bytes.
-        offsets (Int32Array): Sequence start offsets.
-        lengths (Int32Array): Sequence lengths.
+        seqs (Types.UInt8Array): Concatenated sequence bytes.
+        offsets (Types.Int32Array): Sequence start offsets.
+        lengths (Types.Int32Array): Sequence lengths.
 
     Returns:
-        UInt64Array: 1D array of 64-bit hash values.
+        Types.UInt64Array: 1D array of 64-bit hash values.
     """
     n = len(offsets)
     hashes = np.zeros(n, dtype=np.uint64)
@@ -468,29 +439,29 @@ def _hash_sequences_kernel(
     return hashes
 
 
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _extract_ragged_kernel(
-    seqs: UInt8Array,
-    offsets: Int32Array,
-    indices: Int32Array,
-    starts: Int32Array,
-    ends: Int32Array,
-    strands: Int8Array,
-    comp_map: UInt8Array,
-) -> tuple[UInt8Array, Int32Array, Int32Array]:
+    seqs: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    indices: Types.Int32Array,
+    starts: Types.Int32Array,
+    ends: Types.Int32Array,
+    strands: Types.Int8Array,
+    comp_map: Types.UInt8Array,
+) -> tuple[Types.UInt8Array, Types.Int32Array, Types.Int32Array]:
     r"""Parallel Numba kernel for multi-sequence sub-region extraction and reverse-complementation.
 
     Args:
-        seqs (UInt8Array): Concatenated parent sequence array.
-        offsets (Int32Array): Parent sequence start offsets.
-        indices (Int32Array): Index of parent sequence for each extraction region.
-        starts (Int32Array): 0-based extraction start coordinates.
-        ends (Int32Array): 0-based extraction end coordinates.
-        strands (Int8Array): Strand orientations (1 forward, -1 reverse).
-        comp_map (UInt8Array): Complement character lookup map.
+        seqs (Types.UInt8Array): Concatenated parent sequence array.
+        offsets (Types.Int32Array): Parent sequence start offsets.
+        indices (Types.Int32Array): Index of parent sequence for each extraction region.
+        starts (Types.Int32Array): 0-based extraction start coordinates.
+        ends (Types.Int32Array): 0-based extraction end coordinates.
+        strands (Types.Int8Array): Strand orientations (1 forward, -1 reverse).
+        comp_map (Types.UInt8Array): Complement character lookup map.
 
     Returns:
-        tuple[UInt8Array, Int32Array, Int32Array]:
+        tuple[Types.UInt8Array, Types.Int32Array, Types.Int32Array]:
             Tuple of (extracted concatenated sequence bytes, new offsets, new lengths).
     """
     n = len(indices)
@@ -527,12 +498,12 @@ def _extract_ragged_kernel(
     return out_seqs, out_offsets, out_lengths
 
 
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _internal_stops_kernel(
-    seqs: UInt8Array,
-    offsets: Int32Array,
-    lengths: Int32Array,
-) -> BoolArray:
+    seqs: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
+) -> Types.BoolArray:
     r"""Parallel Numba kernel for detecting internal stop codons in protein sequences.
 
     Args:

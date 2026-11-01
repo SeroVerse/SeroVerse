@@ -10,7 +10,7 @@ from seroverse.core.align.seeds import Seed, Seeds
 from seroverse.core.seq.alphabet import Alphabet
 from seroverse.core.seq.clustering import Clusterer
 from seroverse.core.seq.kmers import FracMinHashIndex, RandstrobeIndex
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
 
 
 def test_substitution_matrix_singletons_and_lut() -> None:
@@ -66,8 +66,8 @@ def test_substitution_matrix_singletons_and_lut() -> None:
 
 def test_pairwise_aligner_rolling_gotoh_and_dna() -> None:
     """Verify rolling-row + bit-packed uint8 traceback Gotoh alignment for protein and DNA."""
-    q_prot = Sequences.from_bytes([b"MKTLLILAVVAAALA", b"ACDEFGHIKLMNPQRSTVWY"])
-    t_prot = Sequences.from_bytes([b"MKTLLVLAVVAAALA", b"ACDEFGGGIKLMNPQRSTVWY"])
+    q_prot = SeqRecords.from_bytes([b"MKTLLILAVVAAALA", b"ACDEFGHIKLMNPQRSTVWY"])
+    t_prot = SeqRecords.from_bytes([b"MKTLLVLAVVAAALA", b"ACDEFGGGIKLMNPQRSTVWY"])
 
     aligner = PairwiseAligner()
     alns = aligner(q_prot, t_prot)
@@ -95,8 +95,8 @@ def test_pairwise_aligner_rolling_gotoh_and_dna() -> None:
 
     # DNA alignment with SubstitutionMatrix.DNA
     dna_aligner = PairwiseAligner(matrix=SubstitutionMatrix.DNA, gap_open=5, gap_extend=2, k=10)
-    q_dna = Sequences.from_bytes([b"ACGTACGTACGTACGT"])
-    t_dna = Sequences.from_bytes([b"ACGTACGTTACGTACGT"])
+    q_dna = SeqRecords.from_bytes([b"ACGTACGTACGTACGT"])
+    t_dna = SeqRecords.from_bytes([b"ACGTACGTTACGTACGT"])
     dna_alns = dna_aligner(q_dna, t_dna)
     assert len(dna_alns) == 1
     assert dna_alns[0].matches == 16
@@ -116,7 +116,7 @@ def test_pairwise_aligner_prefilter_and_search() -> None:
     s0 = b"MKTLLILAVVAAALAGSGVASAQITGPVVAAK"
     s1 = b"MKTLLVLAVVAAALAGSGVASAQITGPVVAAK"  # Close homolog of s0
     s2 = b"WYWYWYWYWYWYWYWYWYWYWYWYWYWYWYWY"  # Unrelated sequence
-    seqs = Sequences.from_bytes([s0, s1, s2])
+    seqs = SeqRecords.from_bytes([s0, s1, s2])
 
     aligner = PairwiseAligner()
     # Self-search upper triangle
@@ -128,8 +128,8 @@ def test_pairwise_aligner_prefilter_and_search() -> None:
     assert int(seeds[0].score) >= 35
 
     # Bipartite search (queries vs targets) with shifted diagonal
-    q_seqs = Sequences.from_bytes([b"GGGGGG" + s0])
-    t_seqs = Sequences.from_bytes([s1, s2])
+    q_seqs = SeqRecords.from_bytes([b"GGGGGG" + s0])
+    t_seqs = SeqRecords.from_bytes([s1, s2])
     b_seeds, b_alns = aligner.search(q_seqs, t_seqs, min_ungapped_score=35)
     assert len(b_seeds) == 1
     assert int(b_seeds[0].query_index) == 0
@@ -151,8 +151,8 @@ def test_consensus_diagonal_fixes_first_hit_collision() -> None:
     query_seq = repeat_10 + core  # length 130: repeat at 0..10, core at 10..130
     target_seq = core + filler_t + repeat_10  # length 150: core at 0..120, repeat at 140..150
 
-    q_seqs = Sequences.from_bytes([query_seq])
-    t_seqs = Sequences.from_bytes([target_seq])
+    q_seqs = SeqRecords.from_bytes([query_seq])
+    t_seqs = SeqRecords.from_bytes([target_seq])
 
     # Use scaled=1 so all 10-mers are indexed; the very first query k-mer at pos 0 hits target pos 140 (d = -140),
     # while ~110 subsequent k-mers hit along the true diagonal d = +10.
@@ -187,7 +187,7 @@ def test_consensus_diagonal_fixes_first_hit_collision() -> None:
     # Also verify RandstrobeIndex hits with query_seqs and target_seqs
     prot_a = b"MKTLLILAVVAAALAGSGVASAQITGPVVAAK" * 2
     prot_b = b"AAAA" + prot_a
-    p_seqs = Sequences.from_bytes([prot_a, prot_b])
+    p_seqs = SeqRecords.from_bytes([prot_a, prot_b])
     r_target = RandstrobeIndex.build(p_seqs, k=5, s=2, sort_by_hash=True)
     r_query = RandstrobeIndex.build(p_seqs, k=5, s=2, sort_by_hash=False)
     r_hits = r_target.hits(r_query, min_score=2, query_seqs=p_seqs, target_seqs=p_seqs)
@@ -201,7 +201,7 @@ def test_clusterer_with_align_backend() -> None:
     base_a = b"MKTLLILAVVAAALAGSGVASAQITGPVVAAK" * 3
     homolog_a = b"MKTLLVLAVVAAALAGSGVASAQITGPVVAAK" * 3
     base_b = b"WYWYWYWYWYWYWYWYWYWYWYWYWYWYWYWY" * 3
-    seqs = Sequences.from_bytes([base_a, homolog_a, base_b])
+    seqs = SeqRecords.from_bytes([base_a, homolog_a, base_b])
 
     for mode in ("cdhit", "mcl", "greedy_cover", "upgma", "connected_components"):
         clusterer = Clusterer(min_identity=80.0, mode=mode)
@@ -223,8 +223,8 @@ def test_unified_seeds_and_unaggregated_hits() -> None:
     q_seq = domain_a + indel_gap + domain_b
     t_seq = domain_a + domain_b
 
-    q_seqs = Sequences.from_bytes([q_seq])
-    t_seqs = Sequences.from_bytes([t_seq])
+    q_seqs = SeqRecords.from_bytes([q_seq])
+    t_seqs = SeqRecords.from_bytes([t_seq])
 
     t_idx = FracMinHashIndex.build(t_seqs, k=11, scaled=1, canonical=False, sort_by_hash=True)
     q_idx = FracMinHashIndex.build(q_seqs, k=11, scaled=1, canonical=False, sort_by_hash=False)
@@ -256,8 +256,8 @@ def test_pairwise_aligner_block_and_wfa_modes() -> None:
 
     q_seq = left_arm + large_indel + right_arm
     t_seq = left_arm + right_arm
-    q_seqs = Sequences.from_bytes([q_seq])
-    t_seqs = Sequences.from_bytes([t_seq])
+    q_seqs = SeqRecords.from_bytes([q_seq])
+    t_seqs = SeqRecords.from_bytes([t_seq])
 
     seed_0 = Seeds(
         np.array([0], dtype=np.uint32),
@@ -326,8 +326,8 @@ def test_chainer_and_piecewise_chain_alignment() -> None:
     t0_seq = dom1 + dom2 + dom3
     t1_seq = b"AAAA" + dom1[:45] + b"TTTT"
 
-    q_seqs = Sequences.from_bytes([q_seq])
-    t_seqs = Sequences.from_bytes([t0_seq, t1_seq])
+    q_seqs = SeqRecords.from_bytes([q_seq])
+    t_seqs = SeqRecords.from_bytes([t0_seq, t1_seq])
 
     t_idx = FracMinHashIndex.build(t_seqs, k=10, scaled=2, canonical=False, sort_by_hash=True)
     raw_seeds = t_idx.hits(q_seqs, min_score=2, aggregate=False)
@@ -381,15 +381,16 @@ def test_scalar_view_and_batched_container_contracts() -> None:
     """Verify ScalarView, BatchedContainer, and RaggedArrayContainer auto-registration and methods."""
     from dataclasses import dataclass
 
-    from seroverse.core.collections import BatchedContainer, Int32Array, ScalarView
+    from seroverse.core.collections import Batch, View
     from seroverse.core.graph.arborescence import Arborescence, Arborescences
     from seroverse.core.interval import Interval, Intervals, Strand
+    from seroverse.core.types import Types
 
     # ScalarView replace, to_dict, and NumPy-safe __eq__ (including Arborescence with np.ndarray fields)
     arb1 = Arborescence(parents=np.array([-1, 0, 1], dtype=np.int32), score=3.5, slots=np.zeros(3, dtype=np.int32))
     arb2 = arb1.replace(score=3.5)
     arb3 = arb1.replace(parents=np.array([-1, 0, 0], dtype=np.int32))
-    assert isinstance(arb1, ScalarView)
+    assert isinstance(arb1, View)
     assert arb1 == arb2
     assert arb1 != arb3
     assert set(arb1.to_dict()) == {"parents", "score", "slots", "root"}
@@ -414,6 +415,6 @@ def test_scalar_view_and_batched_container_contracts() -> None:
     with pytest.raises(TypeError, match="must be annotated as a 1D NumPy array"):
 
         @dataclass(frozen=True, slots=True)
-        class _InvalidContainer(BatchedContainer[Seed]):
-            xs: Int32Array
+        class _InvalidContainer(Batch[Seed]):
+            xs: Types.Int32Array
             bad_scalar: int

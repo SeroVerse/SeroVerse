@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
-from numba import njit
 
 from seroverse.core.graph.csr import CSR
 from seroverse.core.graph.models import Graph, Graphs
+from seroverse.core.types import Types
 
 type LayoutMode = Literal["fruchterman_reingold", "fr"]
 type InitMode = Literal["random", "circular", "spectral"]
@@ -278,19 +278,19 @@ class LayoutEngine:
 
 
 # Numba Kernels --------------------------------------------------------------------------------------------------------
-@njit(nogil=True, cache=True)
+@Types.njit
 def _fruchterman_reingold_kernel(
-    pos: np.ndarray,
-    edge_u: np.ndarray,
-    edge_v: np.ndarray,
-    edge_w: np.ndarray,
-    fixed_mask: np.ndarray,
+    pos: Types.Float64Array2D,
+    edge_u: Types.Int32Array,
+    edge_v: Types.Int32Array,
+    edge_w: Types.Float64Array,
+    fixed_mask: Types.BoolArray,
     k: float,
     iterations: int,
     t0: float,
     gravity: float,
     tol: float,
-) -> np.ndarray:
+) -> Types.Float64Array2D:
     r"""Numba-compiled Fruchterman-Reingold force-directed layout solver.
 
     Args:
@@ -311,7 +311,7 @@ def _fruchterman_reingold_kernel(
     n_nodes, dim = pos.shape
     n_edges = len(edge_u)
     if n_nodes <= 1 or iterations <= 0:
-        return pos
+        return pos.copy()
 
     coords = pos.copy()
     disp = np.empty((n_nodes, dim), dtype=np.float64)

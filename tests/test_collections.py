@@ -1,22 +1,19 @@
 r"""Unit tests for `seroverse.core.collections` SoA containers and ontology Spec registries."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from seroverse.core.collections import (
-    BatchedContainer,
-    BoolArray,
-    BytesArray,
-    Float32Array,
-    Int8Array,
-    Int32Array,
-    ScalarView,
+    Batch,
     Spec,
-    SpecContainer,
     SpecEnum,
+    Specs,
+    View,
 )
+from seroverse.core.types import Types
 
 
 class MockCategory(SpecEnum):
@@ -41,13 +38,13 @@ class MockRoleSpec(Spec):
 
 
 @dataclass(frozen=True, slots=True)
-class MockRoleSpecs(SpecContainer[MockRoleSpec]):
+class MockRoleSpecs(Specs[MockRoleSpec]):
     r"""Custom `SpecContainer` compiled from `MockRoleSpec` scalar records."""
 
-    abbreviations: BytesArray
-    categories: Int8Array
-    is_machinery: BoolArray
-    null_priors: Float32Array
+    abbreviations: Types.BytesArray
+    categories: Types.Int8Array
+    is_machinery: Types.BoolArray
+    null_priors: Types.Float32Array
 
 
 class MockRole(SpecEnum):
@@ -171,8 +168,8 @@ def test_spec_enum_validation_errors() -> None:
         B = 1
 
         @classmethod
-        def _compile_specs(cls) -> SpecContainer[Spec]:
-            return SpecContainer.from_list([Spec(name=b"only_one")])
+        def _compile_specs(cls) -> Specs[Spec]:
+            return Specs.from_list([Spec(name=b"only_one")])
 
     with pytest.raises(ValueError, match="returned 1 specs for 2 enum members"):
         MismatchedCountEnum.specs()
@@ -183,13 +180,21 @@ def test_spec_enum_validation_errors() -> None:
 
     with pytest.raises(KeyError):
         NoUnknownEnum.resolve("unknown_key")
-    assert isinstance(np.zeros(1, dtype=np.int32), Int32Array.__value__.__origin__)
+    assert isinstance(np.zeros(1, dtype=np.int32), Types.Int32Array.__value__.__origin__)
+    with pytest.raises(TypeError, match="static namespace"):
+        Types()
+    assert Types.resolve_dtype(Types.Int32Array) == np.dtype(np.int32)
+    assert Types.resolve_dtype("Int32Array") == np.dtype(np.int32)
+    assert Types.resolve_dtype("Types.Int32Array") == np.dtype(np.int32)
+    assert Types.resolve_dtype("int32") == np.dtype(np.int32)
+    assert Types.resolve_dtype("np.int32") == np.dtype(np.int32)
+    assert Types.resolve_dtype("BytesArray") == np.dtype("S")
 
 
 def test_container_to_dict_chunks_sort_and_pad() -> None:
     r"""Verify `to_dict`, `chunks`, `argsort`/`sort_by`, and `RaggedArrayContainer.pad`."""
     from seroverse.core.interval import Interval, Intervals, Strand
-    from seroverse.core.seq.seq import Sequence, Sequences
+    from seroverse.core.seq.seq import SeqRecord, SeqRecords
 
     intervals = Intervals.from_list(
         [
@@ -232,16 +237,16 @@ def test_container_to_dict_chunks_sort_and_pad() -> None:
         intervals.sort_by("starts", "ends", descending=(True,))
 
     # 4. RaggedArrayContainer.pad and chunks
-    seqs = Sequences.from_list(
+    seqs = SeqRecords.from_list(
         [
-            Sequence(b"s1", b"\x01\x02\x03"),
-            Sequence(b"s2", b"\x04"),
-            Sequence(b"s3", b"\x05\x06\x07\x08\x09"),
+            SeqRecord(b"s1", b"\x01\x02\x03"),
+            SeqRecord(b"s2", b"\x04"),
+            SeqRecord(b"s3", b"\x05\x06\x07\x08\x09"),
         ]
     )
     seq_chunks = list(seqs.chunks(2))
     assert len(seq_chunks) == 2
-    assert Sequences.concat(seq_chunks) == seqs
+    assert SeqRecords.concat(seq_chunks) == seqs
 
     padded = seqs.pad(fill_value=255)
     expected = np.array(
@@ -262,26 +267,26 @@ def test_container_to_dict_chunks_sort_and_pad() -> None:
     )
 
     # Empty pad
-    assert Sequences.empty().pad().shape == (0, 0)
+    assert SeqRecords.empty().pad().shape == (0, 0)
     with pytest.raises(ValueError, match="not a ragged field"):
         seqs.pad("lengths")
 
     # Support nested BatchedContainer fields while rejecting arbitrary non-array/non-container types
     @dataclass(frozen=True, slots=True)
-    class _NestedItem(ScalarView):
+    class _NestedItem(View):
         interval: Interval
-        seq: Sequence
+        seq: SeqRecord
         score: int
 
     @dataclass(frozen=True, slots=True)
-    class _NestedBatch(BatchedContainer[_NestedItem]):
+    class _NestedBatch(Batch[_NestedItem]):
         intervals: Intervals
-        seqs: Sequences
-        scores: Int32Array
+        seqs: SeqRecords
+        scores: Types.Int32Array
 
     items = [
-        _NestedItem(Interval(10, 40, Strand.FORWARD), Sequence(b"a", b"ATG"), 5),
-        _NestedItem(Interval(50, 90, Strand.REVERSE), Sequence(b"b", b"TAA"), 9),
+        _NestedItem(Interval(10, 40, Strand.FORWARD), SeqRecord(b"a", b"ATG"), 5),
+        _NestedItem(Interval(50, 90, Strand.REVERSE), SeqRecord(b"b", b"TAA"), 9),
     ]
     batch = _NestedBatch.from_list(items)
     assert len(batch) == 2
@@ -292,8 +297,152 @@ def test_container_to_dict_chunks_sort_and_pad() -> None:
     assert _NestedBatch.concat([batch[:1], batch[1:]]) == batch
     assert len(_NestedBatch.empty()) == 0
 
-    with pytest.raises(TypeError, match="must be annotated as a 1D NumPy array or BatchedContainer"):
+    with pytest.raises(TypeError, match="must be annotated as a 1D NumPy array or Batch"):
 
         @dataclass(frozen=True, slots=True)
-        class _InvalidScalarField(BatchedContainer[Spec]):
+        class _InvalidScalarField(Batch[Spec]):
             bad_field: int
+
+
+def test_features_and_ragged_nested_batches(tmp_path: Path) -> None:
+    r"""Verify `Qualifier`, `Qualifiers`, `FeatureKey`, `Feature`, and `Features` ragged nested batch operations."""
+    from seroverse.core.interval import Interval, Strand
+    from seroverse.core.io.gff import GffReader, GffWriter
+    from seroverse.core.seq.feature import Feature, FeatureKey, Features, Qualifier, Qualifiers
+
+    # 1. FeatureKey SpecEnum resolution
+    assert FeatureKey.from_name("CDS") is FeatureKey.CDS
+    assert FeatureKey.from_name(b"mobile_element") is FeatureKey.MOBILE_ELEMENT
+    assert FeatureKey.from_name("mobile-element") is FeatureKey.MOBILE_ELEMENT
+    assert FeatureKey.resolve("unrecognized_feature") is FeatureKey.UNKNOWN
+
+    # 2. Qualifiers ragged batch and key lookups
+    q1 = Qualifiers.from_mapping(
+        {
+            b"locus_tag": b"b0001",
+            "product": "O-antigen flippase Wzx",
+            b"db_xref": [b"InterPro:IPR001", b"GO:0005886"],
+        }
+    )
+    assert len(q1) == 4
+    assert q1[0] == Qualifier(b"locus_tag", b"b0001")
+    assert q1[b"locus_tag"] == Qualifier(b"locus_tag", b"b0001")
+    assert q1["product"] == Qualifier(b"product", b"O-antigen flippase Wzx")
+    assert q1.get(b"locus_tag") == b"b0001"
+    assert q1.get("product") == b"O-antigen flippase Wzx"
+    assert q1.get(b"missing", b"fallback") == b"fallback"
+    assert q1.get_all(b"db_xref") == [b"InterPro:IPR001", b"GO:0005886"]
+    assert b"locus_tag" in q1
+    assert "product" in q1
+    assert b"nonexistent" not in q1
+    assert Qualifier(b"locus_tag", b"b0001") in q1
+    assert q1.to_multidict() == {
+        b"locus_tag": [b"b0001"],
+        b"product": [b"O-antigen flippase Wzx"],
+        b"db_xref": [b"InterPro:IPR001", b"GO:0005886"],
+    }
+    with pytest.raises(KeyError):
+        _ = q1[b"nonexistent"]
+
+    # 3. Features with ragged nested Qualifiers and 1-to-1 nested Intervals
+    f0 = Feature(
+        key=FeatureKey.GENE,
+        interval=Interval(100, 1300, Strand.FORWARD),
+        qualifiers=Qualifiers.from_mapping({b"gene": b"wzx"}),
+    )
+    f1 = Feature(
+        key=FeatureKey.CDS,
+        interval=Interval(100, 1300, Strand.FORWARD),
+        qualifiers=q1,
+    )
+    f2 = Feature(
+        key=FeatureKey.REPEAT_REGION,
+        interval=Interval(20, 80, Strand.REVERSE),
+    )
+
+    feats = Features.from_list([f0, f1, f2])
+    assert len(feats) == 3
+    assert feats[0] == f0
+    assert feats[1] == f1
+    assert feats[2] == f2
+    assert feats[1].start == 100
+    assert feats[1].end == 1300
+    assert feats[1].strand is Strand.FORWARD
+    assert len(feats[1]) == 1200
+    assert feats[1].get_qualifier("locus_tag") == b"b0001"
+
+    # Contiguous slicing, non-contiguous fancy indexing, filtering, sorting, and concat
+    assert feats[1:3][0] == f1
+    assert feats[1:3][1] == f2
+    assert feats[[2, 0]][0] == f2
+    assert feats[[2, 0]][1] == f0
+    assert Features.concat([feats[:1], feats[1:2], feats[2:]]) == feats
+
+    cds_only = feats.filter_by_key(FeatureKey.CDS)
+    assert len(cds_only) == 1
+    assert cds_only[0] == f1
+
+    sorted_feats = feats.sort_by("starts", "keys")
+    assert sorted_feats[0] == f2
+    assert sorted_feats[1] == f1
+    assert sorted_feats[2] == f0
+
+    with pytest.raises(TypeError, match="Cannot pad nested container field"):
+        feats.pad()
+
+    # 4. GFF3 serialization and GffReader/GffWriter streaming/batch/file round-trip
+    f_parent = Feature(
+        key=FeatureKey.BIOSYNTHETIC_GENE_CLUSTER,
+        interval=Interval(0, 1500, Strand.FORWARD),
+        qualifiers=Qualifiers.from_mapping(
+            {
+                b"ID": b"locus_1",
+                b"Name": b"CPS;O1=K1",
+                b"score": b"42.50",
+            }
+        ),
+    )
+    all_feats = Features.from_list([f_parent, f0, f1, f2])
+    gff_doc = all_feats.to_gff3(seqid=b"contig_1", source=b"SeroRef")
+    assert gff_doc.startswith(b"##gff-version 3\ncontig_1\tSeroRef\tbiosynthetic_gene_cluster\t1\t1500\t42.50\t+\t.\t")
+    assert b"Name=CPS%3BO1%3DK1" in gff_doc
+
+    parsed_batch = GffReader.from_bytes(gff_doc + b"##FASTA\n>contig_1\nACGT\n", chunk_size=19).load()
+    assert parsed_batch == all_feats
+    assert parsed_batch[0].get_qualifier(b"Name") == b"CPS;O1=K1"
+    assert parsed_batch[0].get_qualifier(b"score") == b"42.50"
+
+    gff_gz_path = tmp_path / "annotations.gff3.gz"
+    GffWriter.to_file(gff_gz_path, all_feats, seqid=b"contig_1", source=b"SeroRef")
+    assert GffReader.from_file(gff_gz_path).load() == all_feats
+
+
+def test_types_njit_eager_signatures() -> None:
+    """Verify @Types.njit derives eager Numba signatures and enforces concrete annotations."""
+
+    @Types.njit
+    def _scale_into(src: Types.Float64Array, dst: Types.Float64Array, factor: float) -> float:
+        total = 0.0
+        for i in range(len(src)):
+            val = src[i] * factor
+            dst[i] = val
+            total += val
+        return total
+
+    # Eagerly compiled at decoration time before any call
+    assert len(getattr(_scale_into, "overloads", {})) == 1
+
+    # Read-only input array accepted alongside writable output array
+    x = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    x.setflags(write=False)
+    y = np.zeros(3, dtype=np.float64)
+    total = _scale_into(x, y, 2.5)
+    assert np.isclose(total, 15.0)
+    np.testing.assert_allclose(y, [2.5, 5.0, 7.5])
+
+    # Missing or unresolvable annotations raise TypeError at decoration time
+    with pytest.raises(TypeError, match="Cannot derive Numba signature"):
+
+        @Types.njit
+        def _unresolvable_ann(a: object, b: int) -> int:
+            return b

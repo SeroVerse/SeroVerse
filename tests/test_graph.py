@@ -19,7 +19,7 @@ from seroverse.core.graph.gnn import RelationalMPNN
 from seroverse.core.graph.layout import LayoutEngine
 from seroverse.core.graph.models import Graph, Graphs
 from seroverse.core.seq.clustering import Clusterer
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
 
 
 def _make_sample_graphs() -> tuple[Graph, Graph, Graphs]:
@@ -290,7 +290,7 @@ def test_layout_engine_and_clustering_csr() -> None:
     assert batch_coords.shape == (len(pan_nodes), 3)
 
     # Sequence clustering modes using CSR & connected_components_from_edges
-    seqs = Sequences.from_bytes(
+    seqs = SeqRecords.from_bytes(
         [
             b"MKKVLLVTGAGGSIGSELCRQILK",
             b"MKKVLLVTGAGGSIGSELCRQILK",

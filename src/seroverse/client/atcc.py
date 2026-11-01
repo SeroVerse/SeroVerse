@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 from seroverse.client.base import Client
 from seroverse.client.progress import current_progress
 from seroverse.core.io.fasta import FastaReader
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
 
 ATCC_GENOME_PORTAL_URL = "https://genomes.atcc.org/api"
 
@@ -578,11 +578,11 @@ class ATCCGenomePortalClient(Client):
         *,
         truncate_id: bool = True,
         uppercase: bool = True,
-    ) -> Sequences:
+    ) -> SeqRecords:
         """Download the assembly FASTA for `genome_id` and parse it into a [`Sequences`][seroverse.core.seq.seq.Sequences] container."""
         fasta_bytes = self.download_assembly(genome_id, decompress=True)
         if not fasta_bytes:
-            return Sequences.empty()
+            return SeqRecords.empty()
         with FastaReader.from_bytes(
             fasta_bytes,
             truncate_id=truncate_id,

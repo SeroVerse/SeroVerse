@@ -6,17 +6,17 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 import numpy as np
-from numba import njit
 
 from seroverse.core.graph.csr import CSR
 from seroverse.core.graph.models import Graph
+from seroverse.core.types import Types
 
 
 # Numba Hungarian / Jonker-Volgenant Assignment Kernel -----------------------------------------------------------------
-@njit(cache=True, nogil=True)
+@Types.njit
 def _linear_sum_assignment_kernel(
-    cost_matrix: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+    cost_matrix: Types.Float64Array2D,
+) -> tuple[Types.Int64Array, Types.Int64Array]:
     """Solve rectangular minimum-weight bipartite assignment via shortest augmenting paths in O(n * m^2)."""
     nr, nc = cost_matrix.shape
     if nr == 0 or nc == 0:

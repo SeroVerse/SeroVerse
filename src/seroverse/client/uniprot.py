@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from seroverse.client.base import Client
 from seroverse.core.io.fasta import FastaReader
-from seroverse.core.seq.seq import Sequence, Sequences
+from seroverse.core.seq.seq import SeqRecord, SeqRecords
 
 UNIPROT_API_URL = "https://rest.uniprot.org"
 
@@ -274,7 +274,7 @@ class UniProtClient(Client):
         include_isoform: bool = False,
         truncate_id: bool = True,
         uppercase: bool = True,
-    ) -> Iterator[Sequence]:
+    ) -> Iterator[SeqRecord]:
         """Stream [`Sequence`][seroverse.core.seq.seq.Sequence] records from UniProt in $O(1)$ memory.
 
         Automatically uses `/<database>/search?size=limit` when `limit <= 500` and `/<database>/stream`
@@ -314,7 +314,7 @@ class UniProtClient(Client):
         raw_stream = _ChunkStream(_iter_maybe_gzip_chunks(chunk_gen))
         try:
             with FastaReader(raw_stream, truncate_id=truncate_id, uppercase=uppercase) as reader:
-                records: Iterator[Sequence] = islice(reader, limit) if limit is not None else reader
+                records: Iterator[SeqRecord] = islice(reader, limit) if limit is not None else reader
                 yield from records
         finally:
             raw_stream.close()
@@ -332,7 +332,7 @@ class UniProtClient(Client):
         include_isoform: bool = False,
         truncate_id: bool = True,
         uppercase: bool = True,
-    ) -> Sequences:
+    ) -> SeqRecords:
         """Fetch matching UniProt sequences into a contiguous [`Sequences`][seroverse.core.seq.seq.Sequences] SoA batch.
 
         Args:
@@ -346,10 +346,10 @@ class UniProtClient(Client):
             uppercase: If `True`, normalizes sequence bytes to uppercase ASCII.
 
         Returns:
-            Sequences: Packed Structure-of-Arrays container of fetched sequences.
+            SeqRecords: Packed Structure-of-Arrays container of fetched sequences.
         """
         if limit is not None and limit <= 0:
-            return Sequences.empty()
+            return SeqRecords.empty()
 
         # When limit > 500, `/stream` is used; stop reading chunks immediately after `limit` records
         if limit is not None and limit > self._MAX_SEARCH_SIZE:
@@ -365,7 +365,7 @@ class UniProtClient(Client):
                     uppercase=uppercase,
                 )
             )
-            return Sequences.from_list(items)
+            return SeqRecords.from_list(items)
 
         endpoint, params = self._build_fasta_request(
             query,

@@ -8,16 +8,17 @@ along with Numba-accelerated local ungapped diagonal refinement.
 from dataclasses import dataclass, field
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from seroverse.core.align.score import SubstitutionMatrix, _score_ungapped_diagonal
-from seroverse.core.collections import BatchedContainer, Int32Array, ScalarView, UInt16Array, UInt32Array
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.collections import Batch, View
+from seroverse.core.seq.seq import SeqRecords
+from seroverse.core.types import Types
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
-class Seed(ScalarView):
+class Seed(View):
     r"""Alignment seed / anchor representing a matching region between query and target.
 
     Attributes:
@@ -40,7 +41,7 @@ class Seed(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class Seeds(BatchedContainer[Seed]):
+class Seeds(Batch[Seed]):
     r"""Structure-of-Arrays (SoA) batch container for alignment seeds and chaining anchors.
 
     Unifies aggregated pair-level seeds (1 consensus diagonal per `(query, target)` pair)
@@ -57,13 +58,13 @@ class Seeds(BatchedContainer[Seed]):
         spans (UInt16Array): 1D array of anchor match lengths (`k`).
     """
 
-    query_indices: UInt32Array
-    target_indices: UInt32Array
-    scores: UInt32Array
-    offsets: Int32Array
-    q_pos: Int32Array = field(default_factory=lambda: np.empty(0, dtype=np.int32))
-    t_pos: Int32Array = field(default_factory=lambda: np.empty(0, dtype=np.int32))
-    spans: UInt16Array = field(default_factory=lambda: np.empty(0, dtype=np.uint16))
+    query_indices: Types.UInt32Array
+    target_indices: Types.UInt32Array
+    scores: Types.UInt32Array
+    offsets: Types.Int32Array
+    q_pos: Types.Int32Array = field(default_factory=lambda: np.empty(0, dtype=np.int32))
+    t_pos: Types.Int32Array = field(default_factory=lambda: np.empty(0, dtype=np.int32))
+    spans: Types.UInt16Array = field(default_factory=lambda: np.empty(0, dtype=np.uint16))
 
     def __post_init__(self) -> None:
         r"""Populate default anchor coordinates if constructed with 4-argument legacy signature."""
@@ -97,12 +98,12 @@ class Seeds(BatchedContainer[Seed]):
 
         return best_batch
 
-    def extract_sequences(self, queries: Sequences, targets: Sequences) -> tuple[Sequences, Sequences]:
+    def extract_sequences(self, queries: SeqRecords, targets: SeqRecords) -> tuple[SeqRecords, SeqRecords]:
         r"""Extract parallel batches of query and target sequences mapped by this seed batch.
 
         Args:
-            queries (Sequences): Source collection of query sequences.
-            targets (Sequences): Source collection of target sequences.
+            queries (SeqRecords): Source collection of query sequences.
+            targets (SeqRecords): Source collection of target sequences.
 
         Returns:
             tuple[Sequences, Sequences]: Paired query and target sequence collections.
@@ -111,16 +112,16 @@ class Seeds(BatchedContainer[Seed]):
 
     def rescore_diagonals(
         self,
-        queries: Sequences,
-        targets: Sequences,
+        queries: SeqRecords,
+        targets: SeqRecords,
         matrix: SubstitutionMatrix = SubstitutionMatrix.BLOSUM62,
         window: int = 16,
     ) -> Seeds:
         r"""Refine diagonal `offsets` by scoring local ungapped homology within `[offset - window, offset + window]`.
 
         Args:
-            queries (Sequences): Query sequences collection.
-            targets (Sequences): Target sequences collection.
+            queries (SeqRecords): Query sequences collection.
+            targets (SeqRecords): Target sequences collection.
             matrix (SubstitutionMatrix): Substitution matrix for ungapped diagonal scoring.
                 Defaults to `SubstitutionMatrix.BLOSUM62`.
             window (int): Half-window search radius around each seed's initial diagonal offset.
@@ -157,20 +158,20 @@ class Seeds(BatchedContainer[Seed]):
 
 
 # Numba Kernels --------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _rescore_seed_diagonals_kernel(
-    query_indices: UInt32Array,
-    target_indices: UInt32Array,
-    seed_offsets: Int32Array,
-    q_seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    q_offsets: Int32Array,
-    q_lengths: Int32Array,
-    t_seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    t_offsets: Int32Array,
-    t_lengths: Int32Array,
-    sub_matrix: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    query_indices: Types.UInt32Array,
+    target_indices: Types.UInt32Array,
+    seed_offsets: Types.Int32Array,
+    q_seqs: Types.UInt8Array,
+    q_offsets: Types.Int32Array,
+    q_lengths: Types.Int32Array,
+    t_seqs: Types.UInt8Array,
+    t_offsets: Types.Int32Array,
+    t_lengths: Types.Int32Array,
+    sub_matrix: Types.Int8Array2D,
     window: np.int32,
-) -> Int32Array:
+) -> Types.Int32Array:
     r"""Refine seed diagonal offsets by scanning a local `[offset - window, offset + window]` diagonal band."""
     n = len(query_indices)
     out_offsets = np.empty(n, dtype=np.int32)

@@ -10,9 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, overload
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from seroverse.core.seq.alphabet import Alphabet
+from seroverse.core.types import Types
 
 _LN_2: float = float(np.log(2.0))
 
@@ -253,16 +254,16 @@ class SubstitutionMatrix:
 
 
 # Numba Kernels --------------------------------------------------------------------------------------------------------
-@njit(nogil=True, cache=True, inline="always")
+@Types.njit(inline="always")
 def _score_ungapped_diagonal(
-    q_data: np.ndarray,
+    q_data: Types.UInt8Array,
     s1: int,
     l1: int,
-    t_data: np.ndarray,
+    t_data: Types.UInt8Array,
     s2: int,
     l2: int,
     d: int,
-    lut: np.ndarray,
+    lut: Types.Int8Array2D,
     min_span: int = 12,
 ) -> int:
     r"""Compute maximum local ungapped score along diagonal $d = i - j$ between two sequences."""
@@ -282,16 +283,16 @@ def _score_ungapped_diagonal(
     return max_sc
 
 
-@njit(parallel=True, nogil=True, cache=True)
+@Types.njit(parallel=True)
 def _ungapped_pair_prefilter(
-    seqs_data: np.ndarray,
-    offsets: np.ndarray,
-    lengths: np.ndarray,
-    q_idx: np.ndarray,
-    t_idx: np.ndarray,
-    lut: np.ndarray,
+    seqs_data: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
+    q_idx: Types.Int32Array,
+    t_idx: Types.Int32Array,
+    lut: Types.Int8Array2D,
     min_ungapped_score: int,
-) -> np.ndarray:
+) -> Types.BoolArray:
     r"""Filter candidate pairs `(q_idx, t_idx)` using MMseqs2-style ungapped diagonal scoring."""
     n_pairs = len(q_idx)
     keep = np.zeros(n_pairs, dtype=np.bool_)

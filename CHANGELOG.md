@@ -9,7 +9,7 @@ All notable changes to **`SeroVerse`** and the SeroVerse ecosystem are documente
 ### Added
 
 - **Structure-of-Arrays & Graph Core (`seroverse.core`)**:
-  - `BatchedContainer` and `RaggedArrayContainer` zero-copy memory protocols (`seroverse.core.collections`).
+  - `Batch` and `RaggedBatch` zero-copy memory protocols (`seroverse.core.collections`).
   - `Intervals` (`seroverse.core.interval`) and `GenomeAssembly` (`seroverse.core.genome`, `seroverse.core.io.fasta`).
   - 2-bit DNA/RNA (`Alphabet.DNA`) and `MMSEQS12` reduced amino-acid alphabets with ragged translation across NCBI translation tables (`seroverse.core.seq.alphabet`).
   - `RandstrobeIndex` ($O(1)$ strobemer seeding) and `FracMinHashIndex` k-mer indices (`seroverse.core.seq.kmers`).

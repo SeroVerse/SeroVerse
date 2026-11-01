@@ -15,23 +15,51 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Self, overload
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
+
+from seroverse.core.types import Types
 
 if TYPE_CHECKING:
     from seroverse.core.graph.models import Graph, Graphs
+
+type _CSRDataArray = (
+    Types.Float64Array
+    | Types.Float32Array
+    | Types.Int8Array
+    | Types.UInt8Array
+    | Types.Int16Array
+    | Types.UInt16Array
+    | Types.Int32Array
+    | Types.UInt32Array
+    | Types.Int64Array
+    | Types.UInt64Array
+)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Compiled Numba CSR & Graph Kernels
 # ----------------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True)
-def _compress_sorted_coo_kernel(
-    rows: np.ndarray,
-    cols: np.ndarray,
-    data: np.ndarray,
+@Types.njit
+def _compress_sorted_coo_kernel[
+    T: (
+        np.float64,
+        np.float32,
+        np.int8,
+        np.uint8,
+        np.int16,
+        np.uint16,
+        np.int32,
+        np.uint32,
+        np.int64,
+        np.uint64,
+    )
+](
+    rows: Types.Int32Array,
+    cols: Types.Int32Array,
+    data: np.ndarray[tuple[int], np.dtype[T]],
     n_rows: int,
     sum_duplicates: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Types.Int32Array, Types.Int32Array, np.ndarray[tuple[int], np.dtype[T]]]:
     """Compress lexicographically sorted `(rows, cols, data)` arrays into CSR `(indptr, indices, data)`."""
     nnz_in = len(rows)
     indptr = np.zeros(n_rows + 1, dtype=np.int32)
@@ -93,14 +121,27 @@ def _compress_sorted_coo_kernel(
     return indptr, indices, out_data
 
 
-@njit(cache=True, nogil=True)
-def _csr_transpose_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
+@Types.njit
+def _csr_transpose_kernel[
+    T: (
+        np.float64,
+        np.float32,
+        np.int8,
+        np.uint8,
+        np.int16,
+        np.uint16,
+        np.int32,
+        np.uint32,
+        np.int64,
+        np.uint64,
+    )
+](
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: np.ndarray[tuple[int], np.dtype[T]],
     n_rows: int,
     n_cols: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Types.Int32Array, Types.Int32Array, np.ndarray[tuple[int], np.dtype[T]]]:
     """Compute the transpose of a CSR matrix in $O(N + \\text{nnz})$ time."""
     nnz = len(indices)
     t_indptr = np.zeros(n_cols + 1, dtype=np.int32)
@@ -124,17 +165,17 @@ def _csr_transpose_kernel(
     return t_indptr, t_indices, t_data
 
 
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _csr_matmul_1d_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
-    vec: np.ndarray,
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: _CSRDataArray,
+    vec: Types.Float64Array,
     n_rows: int,
-) -> np.ndarray:
+) -> Types.Float64Array:
     """Parallel CSR matrix-vector multiplication `y = A @ x`."""
     out = np.zeros(n_rows, dtype=np.float64)
-    for r in prange(n_rows):
+    for r in prange(n_rows):  # type: ignore[not-iterable]
         acc = 0.0
         for k in range(indptr[r], indptr[r + 1]):
             acc += float(data[k]) * float(vec[indices[k]])
@@ -142,18 +183,18 @@ def _csr_matmul_1d_kernel(
     return out
 
 
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _csr_matmul_2d_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
-    mat: np.ndarray,
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: _CSRDataArray,
+    mat: Types.Float64Array2D,
     n_rows: int,
-) -> np.ndarray:
+) -> Types.Float64Array2D:
     """Parallel CSR sparse-dense matrix multiplication `Y = A @ X`."""
     n_cols_out = mat.shape[1]
     out = np.zeros((n_rows, n_cols_out), dtype=np.float64)
-    for r in prange(n_rows):
+    for r in prange(n_rows):  # type: ignore[not-iterable]
         for k in range(indptr[r], indptr[r + 1]):
             c = indices[k]
             w = float(data[k])
@@ -162,8 +203,12 @@ def _csr_matmul_2d_kernel(
     return out
 
 
-@njit(cache=True, nogil=True)
-def _csr_row_sum_kernel(indptr: np.ndarray, data: np.ndarray, n_rows: int) -> np.ndarray:
+@Types.njit
+def _csr_row_sum_kernel(
+    indptr: Types.Int32Array,
+    data: _CSRDataArray,
+    n_rows: int,
+) -> Types.Float64Array:
     """Compute 1D row sums of a CSR matrix."""
     out = np.zeros(n_rows, dtype=np.float64)
     for r in range(n_rows):
@@ -174,8 +219,12 @@ def _csr_row_sum_kernel(indptr: np.ndarray, data: np.ndarray, n_rows: int) -> np
     return out
 
 
-@njit(cache=True, nogil=True)
-def _csr_col_sum_kernel(indices: np.ndarray, data: np.ndarray, n_cols: int) -> np.ndarray:
+@Types.njit
+def _csr_col_sum_kernel(
+    indices: Types.Int32Array,
+    data: _CSRDataArray,
+    n_cols: int,
+) -> Types.Float64Array:
     """Compute 1D column sums of a CSR matrix."""
     out = np.zeros(n_cols, dtype=np.float64)
     for k in range(len(indices)):
@@ -183,14 +232,27 @@ def _csr_col_sum_kernel(indices: np.ndarray, data: np.ndarray, n_cols: int) -> n
     return out
 
 
-@njit(cache=True, nogil=True)
-def _csr_to_dense_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
+@Types.njit
+def _csr_to_dense_kernel[
+    T: (
+        np.float64,
+        np.float32,
+        np.int8,
+        np.uint8,
+        np.int16,
+        np.uint16,
+        np.int32,
+        np.uint32,
+        np.int64,
+        np.uint64,
+    )
+](
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: np.ndarray[tuple[int], np.dtype[T]],
     n_rows: int,
     n_cols: int,
-) -> np.ndarray:
+) -> np.ndarray[tuple[int, int], np.dtype[T]]:
     """Expand CSR arrays into a 2D dense array."""
     out = np.zeros((n_rows, n_cols), dtype=data.dtype)
     for r in range(n_rows):
@@ -199,15 +261,15 @@ def _csr_to_dense_kernel(
     return out
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _csr_laplacian_dense_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: _CSRDataArray,
     n_nodes: int,
     normed: bool,
     symmetrize_unweighted: bool,
-) -> np.ndarray:
+) -> Types.Float64Array2D:
     """Compute a dense (optionally normalized and symmetrized) graph Laplacian directly from CSR arrays."""
     lap = np.zeros((n_nodes, n_nodes), dtype=np.float64)
     if n_nodes == 0:
@@ -257,8 +319,8 @@ def _csr_laplacian_dense_kernel(
     return lap
 
 
-@njit(cache=True, nogil=True, inline="always")
-def _dsu_union(parent: np.ndarray, u: int, v: int) -> None:
+@Types.njit(inline="always")
+def _dsu_union(parent: Types.Int32Array, u: int, v: int) -> None:
     """Union two vertices in a Disjoint Set Union array with path halving."""
     if u == v:
         return
@@ -277,8 +339,8 @@ def _dsu_union(parent: np.ndarray, u: int, v: int) -> None:
             parent[ru] = rv
 
 
-@njit(cache=True, nogil=True, inline="always")
-def _dsu_finalize(parent: np.ndarray) -> tuple[int, np.ndarray]:
+@Types.njit(inline="always")
+def _dsu_finalize(parent: Types.Int32Array) -> tuple[int, Types.Int32Array]:
     """Compress DSU parent pointers into contiguous `0..n_comp-1` component labels."""
     n_nodes = len(parent)
     labels = np.full(n_nodes, -1, dtype=np.int32)
@@ -295,12 +357,12 @@ def _dsu_finalize(parent: np.ndarray) -> tuple[int, np.ndarray]:
     return n_comp, labels
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _edges_connected_components_kernel(
     n_nodes: int,
-    edge_u: np.ndarray,
-    edge_v: np.ndarray,
-) -> tuple[int, np.ndarray]:
+    edge_u: Types.Int32Array,
+    edge_v: Types.Int32Array,
+) -> tuple[int, Types.Int32Array]:
     """Compute undirected connected components in $O(N + E)$ time over flat edge arrays."""
     if n_nodes <= 0:
         return 0, np.empty(0, dtype=np.int32)
@@ -310,13 +372,13 @@ def _edges_connected_components_kernel(
     return _dsu_finalize(parent)
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _connected_components_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: _CSRDataArray,
     n_nodes: int,
-) -> tuple[int, np.ndarray]:
+) -> tuple[int, Types.Int32Array]:
     """Compute undirected connected components in $O(N + \\text{nnz})$ time directly over CSR structure."""
     if n_nodes <= 0:
         return 0, np.empty(0, dtype=np.int32)
@@ -328,14 +390,14 @@ def _connected_components_kernel(
     return _dsu_finalize(parent)
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _extract_upper_undirected_edges_kernel(
-    indptr: np.ndarray,
-    indices: np.ndarray,
-    data: np.ndarray,
+    indptr: Types.Int32Array,
+    indices: Types.Int32Array,
+    data: _CSRDataArray,
     n_nodes: int,
     use_weights: bool,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Float64Array]:
     """Symmetrize a CSR matrix (`A + A.T`) and extract upper-triangular undirected edges `(u < v, w)`."""
     if n_nodes <= 1 or len(indices) == 0:
         return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float64)
@@ -398,12 +460,12 @@ def _extract_upper_undirected_edges_kernel(
     return uniq_u[:out_cnt].copy(), uniq_v[:out_cnt].copy(), uniq_w[:out_cnt].copy()
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _build_2hop_edges_kernel(
     n_real: int,
-    e_src: np.ndarray,
-    e_dst: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+    e_src: Types.Int32Array,
+    e_dst: Types.Int32Array,
+) -> tuple[Types.Int32Array, Types.Int32Array]:
     """Build 2-hop directed paths `u -> w -> v` (`u != v`) in CSR without Python lists."""
     n_e = len(e_src)
     if n_real == 0 or n_e == 0:
@@ -706,11 +768,15 @@ class CSR:
             if other.ndim == 1:
                 if len(other) != self.shape[1]:
                     raise ValueError(f"Dimension mismatch in CSR @ 1D array: {self.shape} vs {other.shape}.")
-                return _csr_matmul_1d_kernel(self.indptr, self.indices, self.data, other, self.shape[0])
+                return _csr_matmul_1d_kernel(
+                    self.indptr, self.indices, self.data, np.asarray(other, dtype=np.float64), self.shape[0]
+                )
             if other.ndim == 2:
                 if other.shape[0] != self.shape[1]:
                     raise ValueError(f"Dimension mismatch in CSR @ 2D array: {self.shape} vs {other.shape}.")
-                return _csr_matmul_2d_kernel(self.indptr, self.indices, self.data, other, self.shape[0])
+                return _csr_matmul_2d_kernel(
+                    self.indptr, self.indices, self.data, np.asarray(other, dtype=np.float64), self.shape[0]
+                )
             raise ValueError(f"CSR @ ndarray only supports 1D or 2D arrays; got {other.ndim}D.")
         if isinstance(other, CSR):
             return CSR.from_dense(self.toarray() @ other.toarray())

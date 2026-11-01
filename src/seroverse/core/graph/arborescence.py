@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from typing import ClassVar, Literal, Self
 
 import numpy as np
-from numba import njit
 
-from seroverse.core.collections import Float64Array, Int32Array, RaggedArrayContainer, ScalarView
+from seroverse.core.collections import RaggedBatch, View
+from seroverse.core.types import Types
 
 _NEG_INF = -1e30
 
@@ -22,13 +22,20 @@ _NEG_INF = -1e30
 # ----------------------------------------------------------------------------------------------------------------------
 # Private Numba Branch-and-Bound Kernels
 # ----------------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True)
+@Types.njit
 def _prepare_sorted_incoming_candidates(
-    weights_3d: np.ndarray,
-    groups_3d: np.ndarray,
-    active_mask: np.ndarray,
+    weights_3d: Types.Float64Array3D,
+    groups_3d: Types.Int32Array3D,
+    active_mask: Types.UInt8Array,
     root: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    Types.Int32Array2D,
+    Types.Int32Array2D,
+    Types.Int32Array2D,
+    Types.Float64Array2D,
+    Types.Int32Array,
+    Types.Int32Array,
+]:
     """Pre-sort valid incoming candidate edges `(u, slot, weight, group)` per target vertex `v`."""
     n, _, s_dim = weights_3d.shape
     max_cands = n * s_dim
@@ -77,15 +84,15 @@ def _prepare_sorted_incoming_candidates(
     return cand_u, cand_s, cand_g, cand_w, cand_counts, order_v
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _branch_and_bound_k_best(
-    weights_3d: np.ndarray,
-    groups_3d: np.ndarray,
-    active_mask: np.ndarray,
+    weights_3d: Types.Float64Array3D,
+    groups_3d: Types.Int32Array3D,
+    active_mask: Types.UInt8Array,
     root: int,
     k_best: int,
     max_backtracks: int = 250_000,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+) -> tuple[Types.Int32Array2D, Types.Int32Array2D, Types.Float64Array, int]:
     """Iterative stack-based Numba branch-and-bound for exact constrained top-`k` arborescences."""
     n = weights_3d.shape[0]
     cand_u, cand_s, cand_g, cand_w, cand_counts, order_v = _prepare_sorted_incoming_candidates(
@@ -201,7 +208,7 @@ def _branch_and_bound_k_best(
 # ScalarView & RaggedArrayContainer
 # ----------------------------------------------------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
-class Arborescence(ScalarView):
+class Arborescence(View):
     r"""Scalar view of a single directed spanning arborescence.
 
     Attributes:
@@ -213,9 +220,9 @@ class Arborescence(ScalarView):
         root: Root vertex index (`0 <= root < N`). Defaults to `0`.
     """
 
-    parents: Int32Array
+    parents: Types.Int32Array
     score: float
-    slots: Int32Array
+    slots: Types.Int32Array
     root: int = 0
 
     @property
@@ -274,7 +281,7 @@ class Arborescence(ScalarView):
 
 
 @dataclass(slots=True, frozen=True)
-class Arborescences(RaggedArrayContainer[Arborescence]):
+class Arborescences(RaggedBatch[Arborescence]):
     r"""Ragged Structure-of-Arrays (SoA) container of [`Arborescence`][seroverse.core.graph.arborescence.Arborescence] trees.
 
     Attributes:
@@ -288,12 +295,12 @@ class Arborescences(RaggedArrayContainer[Arborescence]):
 
     _ragged_fields: ClassVar[tuple[str, ...]] = ("parents", "slots")
 
-    parents: Int32Array
-    scores: Float64Array
-    slots: Int32Array
-    roots: Int32Array
-    offsets: Int32Array
-    lengths: Int32Array
+    parents: Types.Int32Array
+    scores: Types.Float64Array
+    slots: Types.Int32Array
+    roots: Types.Int32Array
+    offsets: Types.Int32Array
+    lengths: Types.Int32Array
 
     @classmethod
     def k_best(

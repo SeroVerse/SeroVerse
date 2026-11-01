@@ -19,7 +19,7 @@ If you are reporting a bug, please include:
 Look through the GitHub issues for open bugs or enhancements at https://github.com/SeroVerse/SeroVerse/issues. If you are proposing a new feature:
 
 - Explain how it fits into `SeroVerse`'s foundational architecture (`seroverse.core` and `seroverse.client`) or downstream pillar packages (`SeroRef`, `KBank`, `SeroGen`, `SeroEpi`).
-- Keep hot-path data structures in contiguous Structure-of-Arrays (SoA) NumPy buffers (`BatchedContainer` / `RaggedArrayContainer`) so Numba kernels remain zero-copy and GIL-free.
+- Keep hot-path data structures in contiguous Structure-of-Arrays (SoA) NumPy buffers (`Batch` / `RaggedBatch`) so Numba kernels remain zero-copy and GIL-free.
 - Preserve strict module boundaries (keep `__init__.py` files empty and use explicit submodule imports).
 
 ## Local Development Setup

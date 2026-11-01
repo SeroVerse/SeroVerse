@@ -8,7 +8,8 @@ vectorized interval collections via [`Intervals`][seroverse.core.interval.Interv
 from dataclasses import dataclass
 from enum import IntEnum
 
-from seroverse.core.collections import BatchedContainer, Int8Array, Int32Array, ScalarView
+from seroverse.core.collections import Batch, View
+from seroverse.core.types import Types
 
 
 # Enums ----------------------------------------------------------------------------------------------------------------
@@ -66,7 +67,7 @@ class Strand(IntEnum):
 
 # Classes --------------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
-class Interval(ScalarView):
+class Interval(View):
     r"""A single 0-based, half-open genomic interval with strand orientation.
 
     Represents a discrete sequence segment defined by `start` (inclusive), `end` (exclusive),
@@ -92,7 +93,7 @@ class Interval(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class Intervals(BatchedContainer[Interval]):
+class Intervals(Batch[Interval]):
     r"""A high-performance Structure-of-Arrays (SoA) collection of genomic intervals.
 
     Stores starts, ends, and strands as parallel 1D NumPy arrays
@@ -104,12 +105,12 @@ class Intervals(BatchedContainer[Interval]):
         strands (Int8Array): 1D array of strand values (+1, -1, 0).
     """
 
-    starts: Int32Array
-    ends: Int32Array
-    strands: Int8Array
+    starts: Types.Int32Array
+    ends: Types.Int32Array
+    strands: Types.Int8Array
 
     @property
-    def lengths(self) -> Int32Array:
+    def lengths(self) -> Types.Int32Array:
         r"""Compute the lengths of all intervals in base pairs (`ends - starts`).
 
         Returns:

@@ -1,25 +1,23 @@
 """High-performance C-level and zero-copy NumPy FASTA I/O."""
 
-from collections.abc import Callable, Iterator
-from compression import bz2, gzip, lzma, zstd
-from io import BufferedIOBase, BytesIO, RawIOBase
-from pathlib import Path
-from re import Pattern
-from re import compile as re_compile
-from typing import IO, Any, Self
+from collections.abc import Iterator
+from io import BufferedIOBase, RawIOBase
+from typing import IO, ClassVar
 
 import numpy as np
 
-from seroverse.core.seq.seq import Sequence, Sequences
+from seroverse.core.io.base import BaseReader, BaseWriter
+from seroverse.core.seq.seq import SeqRecord, SeqRecords
 
 
-class FastaReader(Iterator[Sequence]):
+class FastaReader(BaseReader[SeqRecord, SeqRecords]):
     r"""High-performance stateful FASTA stream iterator and vectorized batch loader.
 
     Streams binary FASTA handles in chunks, splitting on `\n>` boundaries and applying
-    C-level `bytes.translate` to yield [`Sequence`][seroverse.core.seq.seq.Sequence] instances
+    C-level `bytes.translate` to yield [`SeqRecord`][seroverse.core.seq.seq.SeqRecord] instances
     with $O(1)$ memory overhead, or loads an entire stream at once into a contiguous
-    [`Sequences`][seroverse.core.seq.seq.Sequences] Structure-of-Arrays container via [`load`][seroverse.core.io.fasta.FastaReader.load].
+    [`SeqRecords`][seroverse.core.seq.seq.SeqRecords] Structure-of-Arrays container via
+    [`load`][seroverse.core.io.fasta.FastaReader.load].
 
     Args:
         handle: Open binary stream (`IO[bytes]`) containing FASTA sequence data.
@@ -28,26 +26,13 @@ class FastaReader(Iterator[Sequence]):
         chunk_size: Read buffer size in bytes for streaming iteration (default 4 MiB).
     """
 
-    # Precomputed 256-byte C translation table for single-pass uppercase + whitespace deletion
-    _UPPER_TABLE: bytes = bytes.maketrans(b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    _WHITESPACE: bytes = b"\r\n\t "
-    _SEQUENCE_FILE_REGEX: Pattern[str] = re_compile(
-        r"\.(?P<ext>f(asta|a|na|fn|as))(\.(?P<compression>gz|bz2|xz|zst|zstd))?$"
-    )
-    _OPENERS: dict[str, Callable[..., Any]] = {
-        "gz": gzip.open,
-        "bz2": bz2.open,
-        "xz": lzma.open,
-        "zst": zstd.open,
-        "zstd": zstd.open,
-    }
+    _EXTENSIONS: ClassVar[tuple[str, ...]] = ("fasta", "fa", "fna", "ffn", "fas")
+    _UPPER_TABLE: ClassVar[bytes] = bytes.maketrans(b"abcdefghijklmnopqrstuvwxyz", b"ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    _WHITESPACE: ClassVar[bytes] = b"\r\n\t "
 
     __slots__ = (
-        "_handle",
         "_truncate_id",
         "_uppercase",
-        "_chunk_size",
-        "_stream",
     )
 
     def __init__(
@@ -58,77 +43,9 @@ class FastaReader(Iterator[Sequence]):
         chunk_size: int = 4 * 1024 * 1024,
     ) -> None:
         """Initialize the stateful FASTA reader."""
-        self._handle = handle
         self._truncate_id = truncate_id
         self._uppercase = uppercase
-        self._chunk_size = chunk_size
-        self._stream: Iterator[Sequence] = self._iter_records()
-
-    @classmethod
-    def from_bytes(
-        cls,
-        data: bytes | bytearray | memoryview,
-        truncate_id: bool = True,
-        uppercase: bool = True,
-        chunk_size: int = 4 * 1024 * 1024,
-    ) -> Self:
-        """Construct a [`FastaReader`][seroverse.core.io.fasta.FastaReader] from an in-memory binary buffer.
-
-        Args:
-            data: Raw binary FASTA buffer (`bytes`, `bytearray`, or `memoryview`).
-            truncate_id: If `True`, truncates header IDs at the first whitespace character.
-            uppercase: If `True`, normalizes sequence bytes to uppercase ASCII.
-            chunk_size: Read buffer size in bytes for streaming iteration.
-
-        Returns:
-            FastaReader: Reader wrapping the binary buffer.
-        """
-        return cls(
-            BytesIO(data),
-            truncate_id=truncate_id,
-            uppercase=uppercase,
-            chunk_size=chunk_size,
-        )
-
-    @classmethod
-    def from_file(
-        cls,
-        filepath: str | Path,
-        truncate_id: bool = True,
-        uppercase: bool = True,
-        chunk_size: int = 4 * 1024 * 1024,
-    ) -> Self:
-        """Open a plain or compressed (`.gz`, `.bz2`, `.xz`, `.zst`, `.zstd`) FASTA file."""
-        path = Path(filepath)
-        if not (m := cls._SEQUENCE_FILE_REGEX.search(path.name)):
-            raise NotImplementedError(f"Unsupported format: {path}")
-        opener = cls._OPENERS.get(m.group("compression"), open)
-        return cls(
-            opener(path, mode="rb"),
-            truncate_id=truncate_id,
-            uppercase=uppercase,
-            chunk_size=chunk_size,
-        )
-
-    def __iter__(self) -> Self:
-        """Return the stateful iterator object itself."""
-        return self
-
-    def __next__(self) -> Sequence:
-        """Fetch the next [`Sequence`][seroverse.core.seq.seq.Sequence] record from the FASTA stream."""
-        return next(self._stream)
-
-    def __enter__(self) -> Self:
-        """Enter the runtime context for the reader."""
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        """Exit the runtime context and close the underlying binary stream."""
-        self.close()
-
-    def close(self) -> None:
-        """Close the underlying binary stream."""
-        self._handle.close()
+        super().__init__(handle, chunk_size=chunk_size)
 
     def _parse_header(self, header: bytes) -> bytes:
         """Extract sequence identifier from a raw FASTA header line (without leading `>`)."""
@@ -137,8 +54,8 @@ class FastaReader(Iterator[Sequence]):
             return parts[0] if parts else b""
         return header.strip()
 
-    def _iter_records(self) -> Iterator[Sequence]:
-        """Stateful generator yielding `Sequence` records across chunk boundaries."""
+    def _iter_records(self) -> Iterator[SeqRecord]:
+        """Stateful generator yielding `SeqRecord` records across chunk boundaries."""
         table = self._UPPER_TABLE if self._uppercase else None
         buf = b""
         started = False
@@ -165,7 +82,7 @@ class FastaReader(Iterator[Sequence]):
             if len(parts) > 1:
                 for rec in parts[:-1]:
                     header, _, seq_raw = rec.partition(b"\n")
-                    yield Sequence(
+                    yield SeqRecord(
                         id=self._parse_header(header),
                         seq=seq_raw.translate(table, self._WHITESPACE),
                     )
@@ -173,23 +90,23 @@ class FastaReader(Iterator[Sequence]):
 
         if started and buf:
             header, _, seq_raw = buf.partition(b"\n")
-            yield Sequence(
+            yield SeqRecord(
                 id=self._parse_header(header),
                 seq=seq_raw.translate(table, self._WHITESPACE),
             )
 
-    def load(self) -> Sequences:
-        r"""Load the FASTA stream into memory as a contiguous [`Sequences`][seroverse.core.seq.seq.Sequences] batch.
+    def load(self) -> SeqRecords:
+        r"""Load the FASTA stream into memory as a contiguous [`SeqRecords`][seroverse.core.seq.seq.SeqRecords] batch.
 
         Uses C-level `bytes.split`, `bytes.partition`, and 256-byte lookup table `bytes.translate`
         combined with a single `bytearray.join` allocation and zero-copy `np.frombuffer` view.
 
         Returns:
-            Sequences: Packed Structure-of-Arrays container of all parsed sequences.
+            SeqRecords: Packed Structure-of-Arrays container of all parsed sequences.
         """
         raw = self._handle.read()
         if not raw:
-            return Sequences.empty()
+            return SeqRecords.empty()
 
         # Locate first valid '>' at start of buffer or immediately following a newline
         if raw[0] == 62:  # ord('>')
@@ -197,7 +114,7 @@ class FastaReader(Iterator[Sequence]):
         else:
             nl_gt = raw.find(b"\n>")
             if nl_gt == -1:
-                return Sequences.empty()
+                return SeqRecords.empty()
             first_gt = nl_gt + 1
 
         # Split records at line-initial '>' boundaries using C memmem
@@ -215,9 +132,62 @@ class FastaReader(Iterator[Sequence]):
 
         ids = np.array(ids_list, dtype="S")
         lengths = np.fromiter((len(s) for s in seq_parts), dtype=np.int32, count=n)
-        offsets = Sequences.lengths_to_offsets(lengths)
+        offsets = SeqRecords.lengths_to_offsets(lengths)
 
         # Single C-level buffer allocation + zero-copy writable uint8 NumPy view
         joined_buf = bytearray().join(seq_parts)
         seqs = np.frombuffer(joined_buf, dtype=np.uint8) if len(joined_buf) > 0 else np.empty(0, dtype=np.uint8)
-        return Sequences(ids, seqs, offsets, lengths)
+        return SeqRecords(ids, seqs, offsets, lengths)
+
+
+class FastaWriter(BaseWriter[SeqRecord, SeqRecords]):
+    r"""High-performance binary FASTA stream writer and batch serializer.
+
+    Args:
+        handle: Open writable binary stream (`IO[bytes]`).
+        use_indices: If `True`, formats headers as 0-based integer indices (`>0`, `>1`, ...)
+            instead of sequence `id` byte strings.
+    """
+
+    _EXTENSIONS: ClassVar[tuple[str, ...]] = ("fasta", "fa", "fna", "ffn", "fas")
+
+    __slots__ = (
+        "_use_indices",
+        "_record_index",
+    )
+
+    def __init__(
+        self,
+        handle: IO[bytes] | BufferedIOBase | RawIOBase,
+        *,
+        use_indices: bool = False,
+    ) -> None:
+        """Initialize the stateful FASTA writer."""
+        super().__init__(handle)
+        self._use_indices = use_indices
+        self._record_index = 0
+
+    def _format_scalar(self, item: SeqRecord) -> bytes:
+        """Format a single `SeqRecord` as a FASTA entry."""
+        if self._use_indices:
+            idx = self._record_index
+            self._record_index += 1
+            return b">%d\n%s\n" % (idx, item.seq)
+        return b">%s\n%s\n" % (item.id, item.seq)
+
+    def _format_batch(self, batch: SeqRecords) -> bytes:
+        """Format a `SeqRecords` batch directly from its contiguous `uint8` buffer."""
+        if len(batch.ids) == 0:
+            return b""
+        mv = batch.seqs.data
+        if self._use_indices:
+            base = self._record_index
+            self._record_index += len(batch.ids)
+            return b"".join(
+                b">%d\n%s\n" % (base + i, bytes(mv[int(o) : int(o) + int(length_val)]))
+                for i, (o, length_val) in enumerate(zip(batch.offsets, batch.lengths, strict=False))
+            )
+        return b"".join(
+            b">%s\n%s\n" % (bytes(name), bytes(mv[int(o) : int(o) + int(length_val)]))
+            for name, o, length_val in zip(batch.ids, batch.offsets, batch.lengths, strict=False)
+        )

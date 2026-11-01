@@ -1,19 +1,22 @@
 """Core graph representations, bitfield packing, and vectorized SoA containers."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, fields
 from functools import cache
 from typing import Any, ClassVar, Self
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
-from seroverse.core.collections import BatchedContainer, ScalarView, UInt32Array
+from seroverse.core.collections import Batch, View
 from seroverse.core.graph.csr import CSR, RelationalCSR
+from seroverse.core.types import Types
 
 # Constants ------------------------------------------------------------------------------------------------------------
 TAG_EDGE: int = 1 << 31  # 0x80000000 (Bit 31 discriminator for injected edge nodes)
+_EMPTY_U32: Types.UInt32Array = np.empty(0, dtype=np.uint32)
+_EMPTY_U32.setflags(write=False)
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
@@ -174,15 +177,235 @@ class DirectedEdge:
 
 
 @dataclass(slots=True, frozen=True)
-class Graph(ScalarView):
+class Graph(View):
     """
     Scalar view and topological model representing a single directed graph.
     Provides sparse CSR conversion, multi-hop [`RelationalCSR`][seroverse.core.graph.csr.RelationalCSR]
-    construction, Laplacian spectrum calculation, and 1-Wasserstein spectral distance.
+    construction, Laplacian spectrum calculation, 1-Wasserstein spectral distance,
+    subgraph extraction, and bitmask-aware VF2 subgraph/graph isomorphism.
     """
 
+    _node_cls: ClassVar[type[Any]] = int
+    _edge_cls: ClassVar[type[Any]] = DirectedEdge
+    _edge_type_cls: ClassVar[type[Any]] = int
+
     nodes: tuple[Any, ...] = ()
-    edges: tuple[DirectedEdge, ...] = ()
+    edges: tuple[Any, ...] = ()
+
+    @cache  # noqa: B019
+    def _packed_topology(
+        self,
+    ) -> tuple[
+        Types.UInt32Array,
+        Types.UInt32Array,
+        Types.UInt32Array,
+        Types.UInt32Array,
+    ]:
+        """Return cached contiguous `uint32` arrays `(node_types, edge_sources, edge_targets, edge_types)`."""
+        n_nodes = len(self.nodes)
+        n_edges = len(self.edges)
+        if n_nodes == 0:
+            return _EMPTY_U32, _EMPTY_U32, _EMPTY_U32, _EMPTY_U32
+        node_types = np.fromiter(
+            (n.type_id if hasattr(n, "type_id") else int(n) for n in self.nodes),
+            dtype=np.uint32,
+            count=n_nodes,
+        )
+        node_types.setflags(write=False)
+        if n_edges == 0:
+            return node_types, _EMPTY_U32, _EMPTY_U32, _EMPTY_U32
+        sources = np.fromiter((e.source for e in self.edges), dtype=np.uint32, count=n_edges)
+        targets = np.fromiter((e.target for e in self.edges), dtype=np.uint32, count=n_edges)
+        edge_types = np.fromiter((int(e.edge_type) for e in self.edges), dtype=np.uint32, count=n_edges)
+        sources.setflags(write=False)
+        targets.setflags(write=False)
+        edge_types.setflags(write=False)
+        return node_types, sources, targets, edge_types
+
+    def in_degrees(self) -> Types.Int32Array:
+        """Compute the 1D `int32` array of incoming edge counts per node."""
+        n = len(self.nodes)
+        deg = np.zeros(n, dtype=np.int32)
+        for e in self.edges:
+            if 0 <= e.target < n:
+                deg[e.target] += 1
+        return deg
+
+    def out_degrees(self) -> Types.Int32Array:
+        """Compute the 1D `int32` array of outgoing edge counts per node."""
+        n = len(self.nodes)
+        deg = np.zeros(n, dtype=np.int32)
+        for e in self.edges:
+            if 0 <= e.source < n:
+                deg[e.source] += 1
+        return deg
+
+    def degrees(self) -> Types.Int32Array:
+        """Compute the 1D `int32` array of total degree (`in_degrees + out_degrees`) per node."""
+        n = len(self.nodes)
+        deg = np.zeros(n, dtype=np.int32)
+        for e in self.edges:
+            if 0 <= e.source < n:
+                deg[e.source] += 1
+            if 0 <= e.target < n:
+                deg[e.target] += 1
+        return deg
+
+    def subgraph(self, keep_nodes: Iterable[int] | Types.BoolArray) -> Self:
+        """Extract the induced subgraph over `keep_nodes` (node index sequence or boolean mask) and rebase edges."""
+        n = len(self.nodes)
+        if isinstance(keep_nodes, np.ndarray) and keep_nodes.dtype == np.bool_:
+            kept = [i for i, flag in enumerate(keep_nodes) if flag]
+        else:
+            kept = [int(i) for i in keep_nodes if 0 <= int(i) < n]
+
+        if len(kept) == n and all(idx == i for i, idx in enumerate(kept)):
+            return self
+
+        remap = {old_idx: new_idx for new_idx, old_idx in enumerate(kept)}
+        edge_cls = type(self)._edge_cls
+        new_nodes = tuple(self.nodes[old_idx] for old_idx in kept)
+        new_edges = tuple(
+            edge_cls(source=remap[e.source], target=remap[e.target], edge_type=e.edge_type)
+            for e in self.edges
+            if e.source in remap and e.target in remap
+        )
+        return self.replace(nodes=new_nodes, edges=new_edges)
+
+    def filter_nodes(self, predicate: Callable[[Any], bool]) -> Self:
+        """Return the induced subgraph retaining only nodes where `predicate(node)` is True."""
+        return self.subgraph(i for i, node in enumerate(self.nodes) if predicate(node))
+
+    def filter_edges(self, predicate: Callable[[Any], bool]) -> Self:
+        """Return a copy of this graph retaining only edges where `predicate(edge)` is True."""
+        new_edges = tuple(e for e in self.edges if predicate(e))
+        if len(new_edges) == len(self.edges):
+            return self
+        return self.replace(edges=new_edges)
+
+    def bfs_depths(self, root: int = 0, *, reverse: bool = False) -> dict[int, int]:
+        """Compute shortest-path hop depths from `root` along directed edges (or reversed edges when `reverse=True`)."""
+        n = len(self.nodes)
+        if not (0 <= root < n):
+            return {}
+        adj: list[list[int]] = [[] for _ in range(n)]
+        for e in self.edges:
+            if 0 <= e.source < n and 0 <= e.target < n and e.source != e.target:
+                if reverse:
+                    adj[e.target].append(e.source)
+                else:
+                    adj[e.source].append(e.target)
+        depths: dict[int, int] = {root: 0}
+        queue: list[int] = [root]
+        head = 0
+        while head < len(queue):
+            u = queue[head]
+            head += 1
+            d_u = depths[u]
+            for v in adj[u]:
+                if v not in depths:
+                    depths[v] = d_u + 1
+                    queue.append(v)
+        return depths
+
+    def find_subgraph_mapping(
+        self,
+        other: Graph,
+        *,
+        node_mask: int = 0xFFFFFFFF,
+        node_wildcard_masks: Sequence[int] | Types.UInt32Array = (),
+        edge_mask: int = 0xFFFFFFFF,
+        edge_wildcard_masks: Sequence[int] | Types.UInt32Array = (),
+        require_bijection: bool = False,
+        undirected: bool = False,
+    ) -> dict[int, int] | None:
+        """Find an injective edge-preserving homomorphism (`self` -> `other`) using compiled bitmask VF2.
+
+        Args:
+            other: Target supergraph to match `self` into.
+            node_mask: Strict 32-bit bitmask that must match identically between `self` and `other` nodes.
+            node_wildcard_masks: Sequence of 32-bit bitfield masks where `0` acts as a wildcard.
+            edge_mask: Strict 32-bit bitmask that must match identically between `self` and `other` edge types.
+            edge_wildcard_masks: Sequence of 32-bit edge bitfield masks where `0` acts as a wildcard.
+            require_bijection: If True, requires a full graph isomorphism (`len(self) == len(other)` and equal edge counts).
+            undirected: If True, treats edges as symmetric undirected bonds during matching.
+
+        Returns:
+            Mapping `{u_sub: v_sup}` from 0-based node indices in `self` to `other`, or `None` if no match exists.
+        """
+        sub_n, sub_s, sub_t, sub_et = self._packed_topology()
+        sup_n, sup_s, sup_t, sup_et = other._packed_topology()
+        nw_arr = (
+            node_wildcard_masks
+            if isinstance(node_wildcard_masks, np.ndarray) and node_wildcard_masks.dtype == np.uint32
+            else (np.asarray(node_wildcard_masks, dtype=np.uint32) if len(node_wildcard_masks) > 0 else _EMPTY_U32)
+        )
+        ew_arr = (
+            edge_wildcard_masks
+            if isinstance(edge_wildcard_masks, np.ndarray) and edge_wildcard_masks.dtype == np.uint32
+            else (np.asarray(edge_wildcard_masks, dtype=np.uint32) if len(edge_wildcard_masks) > 0 else _EMPTY_U32)
+        )
+        found, mapping = _vf2_match_kernel(
+            sub_n,
+            sub_s,
+            sub_t,
+            sub_et,
+            sup_n,
+            sup_s,
+            sup_t,
+            sup_et,
+            np.uint32(node_mask & 0xFFFFFFFF),
+            nw_arr,
+            np.uint32(edge_mask & 0xFFFFFFFF),
+            ew_arr,
+            bool(require_bijection),
+            bool(undirected),
+        )
+        if not found:
+            return None
+        return {u: int(mapping[u]) for u in range(len(sub_n))}
+
+    def match_subgraph(
+        self,
+        other: Graph,
+        *,
+        node_mask: int = 0xFFFFFFFF,
+        node_wildcard_masks: Sequence[int] | Types.UInt32Array = (),
+        edge_mask: int = 0xFFFFFFFF,
+        edge_wildcard_masks: Sequence[int] | Types.UInt32Array = (),
+        require_bijection: bool = False,
+        undirected: bool = False,
+    ) -> bool:
+        """Return True if an injective edge-preserving homomorphism (`self` -> `other`) exists."""
+        sub_n, sub_s, sub_t, sub_et = self._packed_topology()
+        sup_n, sup_s, sup_t, sup_et = other._packed_topology()
+        nw_arr = (
+            node_wildcard_masks
+            if isinstance(node_wildcard_masks, np.ndarray) and node_wildcard_masks.dtype == np.uint32
+            else (np.asarray(node_wildcard_masks, dtype=np.uint32) if len(node_wildcard_masks) > 0 else _EMPTY_U32)
+        )
+        ew_arr = (
+            edge_wildcard_masks
+            if isinstance(edge_wildcard_masks, np.ndarray) and edge_wildcard_masks.dtype == np.uint32
+            else (np.asarray(edge_wildcard_masks, dtype=np.uint32) if len(edge_wildcard_masks) > 0 else _EMPTY_U32)
+        )
+        found, _ = _vf2_match_kernel(
+            sub_n,
+            sub_s,
+            sub_t,
+            sub_et,
+            sup_n,
+            sup_s,
+            sup_t,
+            sup_et,
+            np.uint32(node_mask & 0xFFFFFFFF),
+            nw_arr,
+            np.uint32(edge_mask & 0xFFFFFFFF),
+            ew_arr,
+            bool(require_bijection),
+            bool(undirected),
+        )
+        return bool(found)
 
     @cache  # noqa: B019
     def as_graph(
@@ -315,7 +538,7 @@ class Graph(ScalarView):
 
 
 @dataclass(slots=True, frozen=True)
-class Graphs[T: Graph = Graph](BatchedContainer[T]):
+class Graphs[T: Graph = Graph](Batch[T]):
     """
     Base Structure-of-Arrays (SoA) container for batched graph datasets.
     Provides block-diagonal CSR adjacency, Wasserstein spectral distance matrices,
@@ -333,12 +556,12 @@ class Graphs[T: Graph = Graph](BatchedContainer[T]):
     _record_fields: ClassVar[tuple[str, ...]] = ()
     _scalar_type: ClassVar[type[Any] | None] = Graph
 
-    node_types: UInt32Array
-    node_offsets: UInt32Array
-    edge_sources: UInt32Array
-    edge_targets: UInt32Array
-    edge_types: UInt32Array
-    edge_offsets: UInt32Array
+    node_types: Types.UInt32Array
+    node_offsets: Types.UInt32Array
+    edge_sources: Types.UInt32Array
+    edge_targets: Types.UInt32Array
+    edge_types: Types.UInt32Array
+    edge_offsets: Types.UInt32Array
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -358,12 +581,12 @@ class Graphs[T: Graph = Graph](BatchedContainer[T]):
         return len(self.edge_sources)
 
     @property
-    def node_lengths(self) -> UInt32Array:
+    def node_lengths(self) -> Types.UInt32Array:
         """Number of nodes in each graph in the batch."""
         return np.diff(self.node_offsets)
 
     @property
-    def edge_lengths(self) -> UInt32Array:
+    def edge_lengths(self) -> Types.UInt32Array:
         """Number of edges in each graph in the batch."""
         return np.diff(self.edge_offsets)
 
@@ -541,16 +764,19 @@ class Graphs[T: Graph = Graph](BatchedContainer[T]):
         """Materialize the [`Graph`][seroverse.core.graph.models.Graph] (or subclass `T`) at index `idx`."""
         n_s, n_e = int(self.node_offsets[idx]), int(self.node_offsets[idx + 1])
         e_s, e_e = int(self.edge_offsets[idx]), int(self.edge_offsets[idx + 1])
-        nodes = tuple(int(x) for x in self.node_types[n_s:n_e])
+        scalar_cls: type[Any] = self._scalar_type or Graph
+        node_cls = getattr(scalar_cls, "_node_cls", int)
+        edge_cls = getattr(scalar_cls, "_edge_cls", DirectedEdge)
+        edge_type_cls = getattr(scalar_cls, "_edge_type_cls", int)
+        nodes = tuple(node_cls(int(x)) for x in self.node_types[n_s:n_e])
         edges = tuple(
-            DirectedEdge(
+            edge_cls(
                 source=int(self.edge_sources[k]) - n_s,
                 target=int(self.edge_targets[k]) - n_s,
-                edge_type=int(self.edge_types[k]),
+                edge_type=edge_type_cls(int(self.edge_types[k])),
             )
             for k in range(e_s, e_e)
         )
-        scalar_cls: type[Any] = self._scalar_type or Graph
         if not self._record_fields and not self._nested_fields:
             return scalar_cls(nodes=nodes, edges=edges)
         extra_b_fields = tuple(f for f in self._all_fields if f not in self._CSR_FIELDS)
@@ -635,6 +861,87 @@ class Graphs[T: Graph = Graph](BatchedContainer[T]):
             self.edge_sources,
             self.edge_targets,
             self.edge_offsets,
+        )
+
+    def wwl_distance_matrix(
+        self,
+        node_features: np.ndarray[tuple[int, int], np.dtype[Any]],
+        iterations: int = 2,
+        smoothing_factor: float = 0.5,
+    ) -> Types.Float64Array2D:
+        """Compute the all-vs-all Wasserstein Weisfeiler-Lehman (WWL) graph distance matrix across the batch.
+
+        Topologically smooths initial `node_features` of shape `(total_nodes, D)` over symmetrized
+        neighborhoods for `iterations` steps and computes the exact ND 1-Wasserstein (Earth Mover's)
+        distance between resulting node embedding point clouds in parallel via compiled Numba kernels.
+
+        Args:
+            node_features: 2D array of shape `(total_nodes, D)` containing initial continuous node features.
+            iterations: Number of Weisfeiler-Lehman neighborhood smoothing iterations (default `2`).
+            smoothing_factor: Neighborhood averaging weight in `[0.0, 1.0]` (default `0.5`).
+
+        Returns:
+            Symmetric `(len(self), len(self))` `float64` distance matrix.
+        """
+        n_graphs = len(self)
+        n_nodes = len(self.node_types)
+        if n_graphs == 0 or n_nodes == 0:
+            return np.zeros((n_graphs, n_graphs), dtype=np.float64)
+        feats = np.ascontiguousarray(node_features, dtype=np.float64)
+        smoothed = _wl_smooth_embeddings_kernel(
+            feats,
+            self.node_offsets,
+            self.edge_sources,
+            self.edge_targets,
+            self.edge_offsets,
+            int(iterations),
+            float(smoothing_factor),
+        )
+        return _batch_wwl_distance_kernel(smoothed, self.node_offsets)
+
+    def match_subgraph_batch(
+        self,
+        query: Graph,
+        *,
+        node_mask: int = 0xFFFFFFFF,
+        node_wildcard_masks: Sequence[int] | Types.UInt32Array = (),
+        edge_mask: int = 0xFFFFFFFF,
+        edge_wildcard_masks: Sequence[int] | Types.UInt32Array = (),
+        require_bijection: bool = False,
+        undirected: bool = False,
+    ) -> Types.BoolArray:
+        """Screen all graphs in this batch in parallel for a subgraph/isomorphism match with `query`."""
+        n_graphs = len(self)
+        if n_graphs == 0:
+            return np.empty(0, dtype=np.bool_)
+        sub_n, sub_s, sub_t, sub_et = query._packed_topology()
+        nw_arr = (
+            node_wildcard_masks
+            if isinstance(node_wildcard_masks, np.ndarray) and node_wildcard_masks.dtype == np.uint32
+            else (np.asarray(node_wildcard_masks, dtype=np.uint32) if len(node_wildcard_masks) > 0 else _EMPTY_U32)
+        )
+        ew_arr = (
+            edge_wildcard_masks
+            if isinstance(edge_wildcard_masks, np.ndarray) and edge_wildcard_masks.dtype == np.uint32
+            else (np.asarray(edge_wildcard_masks, dtype=np.uint32) if len(edge_wildcard_masks) > 0 else _EMPTY_U32)
+        )
+        return _batch_vf2_has_match_kernel(
+            sub_n,
+            sub_s,
+            sub_t,
+            sub_et,
+            self.node_types,
+            self.node_offsets,
+            self.edge_sources,
+            self.edge_targets,
+            self.edge_types,
+            self.edge_offsets,
+            np.uint32(node_mask & 0xFFFFFFFF),
+            nw_arr,
+            np.uint32(edge_mask & 0xFFFFFFFF),
+            ew_arr,
+            bool(require_bijection),
+            bool(undirected),
         )
 
     def as_pan_graph(
@@ -817,8 +1124,8 @@ class Graphs[T: Graph = Graph](BatchedContainer[T]):
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True)
-def _wasserstein_1d_sorted_kernel(u: np.ndarray, v: np.ndarray) -> float:
+@Types.njit
+def _wasserstein_1d_sorted_kernel(u: Types.Float64Array, v: Types.Float64Array) -> float:
     """Compute exact 1-Wasserstein distance between two pre-sorted 1D empirical distributions."""
     n = len(u)
     m = len(v)
@@ -851,8 +1158,8 @@ def _wasserstein_1d_sorted_kernel(u: np.ndarray, v: np.ndarray) -> float:
     return dist
 
 
-@njit(cache=True, nogil=True)
-def _sym_eigvalsh_kernel(a: np.ndarray) -> np.ndarray:
+@Types.njit
+def _sym_eigvalsh_kernel(a: Types.Float64Array2D) -> Types.Float64Array:
     """Compute sorted eigenvalues of a real symmetric matrix in-place via cyclic Jacobi rotations."""
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
@@ -907,13 +1214,13 @@ def _sym_eigvalsh_kernel(a: np.ndarray) -> np.ndarray:
     return out
 
 
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _batch_spectral_distance_matrix_kernel(
-    node_offsets: np.ndarray,
-    edge_sources: np.ndarray,
-    edge_targets: np.ndarray,
-    edge_offsets: np.ndarray,
-) -> np.ndarray:
+    node_offsets: Types.UInt32Array,
+    edge_sources: Types.UInt32Array,
+    edge_targets: Types.UInt32Array,
+    edge_offsets: Types.UInt32Array,
+) -> Types.Float64Array2D:
     """Compute per-graph normalized Laplacian spectra and pairwise 1-Wasserstein distance matrix in parallel."""
     n_graphs = len(node_offsets) - 1
     dist_matrix = np.zeros((n_graphs, n_graphs), dtype=np.float64)
@@ -923,7 +1230,7 @@ def _batch_spectral_distance_matrix_kernel(
     total_nodes = int(node_offsets[n_graphs])
     all_spectra = np.zeros(total_nodes, dtype=np.float64)
 
-    for g in prange(n_graphs):
+    for g in prange(n_graphs):  # type: ignore[not-iterable]
         m_start = int(node_offsets[g])
         m_end = int(node_offsets[g + 1])
         n_v = m_end - m_start
@@ -962,7 +1269,7 @@ def _batch_spectral_distance_matrix_kernel(
         for u in range(n_v):
             all_spectra[m_start + u] = eigs[u]
 
-    for i in prange(n_graphs):
+    for i in prange(n_graphs):  # type: ignore[not-iterable]
         s_i = int(node_offsets[i])
         e_i = int(node_offsets[i + 1])
         spec_i = all_spectra[s_i:e_i]
@@ -976,18 +1283,18 @@ def _batch_spectral_distance_matrix_kernel(
     return dist_matrix
 
 
-@njit(cache=True, nogil=True, parallel=True)
+@Types.njit(parallel=True)
 def _slice_graph_batch_kernel(
-    kept_indices: np.ndarray,
-    node_types: np.ndarray,
-    node_offsets: np.ndarray,
-    edge_sources: np.ndarray,
-    edge_targets: np.ndarray,
-    edge_types: np.ndarray,
-    edge_offsets: np.ndarray,
-    new_node_offsets: np.ndarray,
-    new_edge_offsets: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    kept_indices: Types.Int64Array,
+    node_types: Types.UInt32Array,
+    node_offsets: Types.UInt32Array,
+    edge_sources: Types.UInt32Array,
+    edge_targets: Types.UInt32Array,
+    edge_types: Types.UInt32Array,
+    edge_offsets: Types.UInt32Array,
+    new_node_offsets: Types.UInt32Array,
+    new_edge_offsets: Types.UInt32Array,
+) -> tuple[Types.UInt32Array, Types.UInt32Array, Types.UInt32Array, Types.UInt32Array]:
     """Gather nodes and rebase edges in parallel across selected graphs in a `Graphs` batch."""
     num_kept = len(kept_indices)
     total_nodes = int(new_node_offsets[num_kept])
@@ -998,7 +1305,7 @@ def _slice_graph_batch_kernel(
     new_targets = np.empty(total_edges, dtype=np.uint32)
     new_types = np.empty(total_edges, dtype=np.uint32)
 
-    for out_i in prange(num_kept):
+    for out_i in prange(num_kept):  # type: ignore[not-iterable]
         orig_i = kept_indices[out_i]
         m_start = int(node_offsets[orig_i])
         m_end = int(node_offsets[orig_i + 1])
@@ -1022,15 +1329,15 @@ def _slice_graph_batch_kernel(
     return new_nodes, new_sources, new_targets, new_types
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _erdos_renyi_edges_kernel(
-    node_offsets: np.ndarray,
+    node_offsets: Types.UInt32Array,
     p: float,
     n_edge_types: int,
     directed: bool,
     allow_self_loops: bool,
     seed: np.uint64,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Types.UInt32Array, Types.UInt32Array, Types.UInt32Array, Types.UInt32Array]:
     """Two-pass deterministic Erdős–Rényi edge generator across a ragged batch of graphs."""
     n_graphs = len(node_offsets) - 1
     edge_offsets = np.zeros(n_graphs + 1, dtype=np.uint32)
@@ -1127,3 +1434,775 @@ def _erdos_renyi_edges_kernel(
                             cursor += 1
 
     return sources, targets, types, edge_offsets
+
+
+@Types.njit(inline="always")
+def _bitmask_compat_kernel(
+    u_val: np.uint32,
+    v_val: np.uint32,
+    strict_mask: np.uint32,
+    wildcard_masks: Types.UInt32Array,
+) -> bool:
+    """Return True if 32-bit packed integers `u_val` and `v_val` satisfy strict and wildcard bitmasks."""
+    if (u_val & strict_mask) != (v_val & strict_mask):
+        return False
+    for i in range(len(wildcard_masks)):
+        m = wildcard_masks[i]
+        u_f = u_val & m
+        v_f = v_val & m
+        if u_f != v_f and u_f != np.uint32(0) and v_f != np.uint32(0):
+            return False
+    return True
+
+
+@Types.njit(inline="always")
+def _pair_edges_compat_kernel(
+    u_start: int,
+    u_end: int,
+    w_target: int,
+    sub_nbrs: Types.Int32Array,
+    sub_etypes: Types.UInt32Array,
+    v_start: int,
+    v_end: int,
+    vw_target: int,
+    sup_nbrs: Types.Int32Array,
+    sup_etypes: Types.UInt32Array,
+    edge_mask: np.uint32,
+    edge_wildcard_masks: Types.UInt32Array,
+) -> bool:
+    """Check if all parallel directed edges `u -> w_target` can be injectively matched into `v -> vw_target`."""
+    req_cnt = 0
+    for idx_u in range(u_start, u_end):
+        if sub_nbrs[idx_u] == w_target:
+            req_cnt += 1
+    if req_cnt == 0:
+        return True
+
+    avail_cnt = 0
+    for idx_v in range(v_start, v_end):
+        if sup_nbrs[idx_v] == vw_target:
+            avail_cnt += 1
+    if req_cnt > avail_cnt:
+        return False
+
+    if req_cnt == 1:
+        for idx_u in range(u_start, u_end):
+            if sub_nbrs[idx_u] == w_target:
+                rl = sub_etypes[idx_u]
+                for idx_v in range(v_start, v_end):
+                    if sup_nbrs[idx_v] == vw_target and _bitmask_compat_kernel(
+                        rl, sup_etypes[idx_v], edge_mask, edge_wildcard_masks
+                    ):
+                        return True
+                return False
+
+    used_bits = np.uint64(0)
+    for idx_u in range(u_start, u_end):
+        if sub_nbrs[idx_u] != w_target:
+            continue
+        rl = sub_etypes[idx_u]
+        matched = False
+        local_idx = 0
+        for idx_v in range(v_start, v_end):
+            if sup_nbrs[idx_v] != vw_target:
+                continue
+            bit = np.uint64(1) << np.uint64(local_idx)
+            if (used_bits & bit) == np.uint64(0) and _bitmask_compat_kernel(
+                rl, sup_etypes[idx_v], edge_mask, edge_wildcard_masks
+            ):
+                used_bits |= bit
+                matched = True
+                break
+            local_idx += 1
+        if not matched:
+            return False
+    return True
+
+
+@Types.njit
+def _build_adj_lists_kernel(
+    n_nodes: int,
+    sources: Types.UInt32Array,
+    targets: Types.UInt32Array,
+    edge_types: Types.UInt32Array,
+    undirected: bool,
+) -> tuple[
+    Types.Int32Array,
+    Types.Int32Array,
+    Types.UInt32Array,
+    Types.Int32Array,
+    Types.Int32Array,
+    Types.UInt32Array,
+]:
+    """Construct flat CSR outgoing and incoming adjacency lists for VF2 matching."""
+    out_deg = np.zeros(n_nodes, dtype=np.int32)
+    in_deg = np.zeros(n_nodes, dtype=np.int32)
+    n_edges = len(sources)
+
+    for k in range(n_edges):
+        u = int(sources[k])
+        v = int(targets[k])
+        if 0 <= u < n_nodes and 0 <= v < n_nodes:
+            out_deg[u] += 1
+            in_deg[v] += 1
+            if undirected and u != v:
+                out_deg[v] += 1
+                in_deg[u] += 1
+
+    out_indptr = np.zeros(n_nodes + 1, dtype=np.int32)
+    in_indptr = np.zeros(n_nodes + 1, dtype=np.int32)
+    for i in range(n_nodes):
+        out_indptr[i + 1] = out_indptr[i] + out_deg[i]
+        in_indptr[i + 1] = in_indptr[i] + in_deg[i]
+
+    tot_out = int(out_indptr[n_nodes])
+    tot_in = int(in_indptr[n_nodes])
+    out_nbrs = np.empty(tot_out, dtype=np.int32)
+    out_etypes = np.empty(tot_out, dtype=np.uint32)
+    in_nbrs = np.empty(tot_in, dtype=np.int32)
+    in_etypes = np.empty(tot_in, dtype=np.uint32)
+
+    out_cur = out_indptr[:-1].copy()
+    in_cur = in_indptr[:-1].copy()
+
+    for k in range(n_edges):
+        u = int(sources[k])
+        v = int(targets[k])
+        if 0 <= u < n_nodes and 0 <= v < n_nodes:
+            et = edge_types[k]
+            po = out_cur[u]
+            out_nbrs[po] = v
+            out_etypes[po] = et
+            out_cur[u] = po + 1
+
+            pi = in_cur[v]
+            in_nbrs[pi] = u
+            in_etypes[pi] = et
+            in_cur[v] = pi + 1
+
+            if undirected and u != v:
+                po2 = out_cur[v]
+                out_nbrs[po2] = u
+                out_etypes[po2] = et
+                out_cur[v] = po2 + 1
+
+                pi2 = in_cur[u]
+                in_nbrs[pi2] = v
+                in_etypes[pi2] = et
+                in_cur[u] = pi2 + 1
+
+    return out_indptr, out_nbrs, out_etypes, in_indptr, in_nbrs, in_etypes
+
+
+@Types.njit
+def _vf2_match_kernel(
+    sub_nodes: Types.UInt32Array,
+    sub_sources: Types.UInt32Array,
+    sub_targets: Types.UInt32Array,
+    sub_edge_types: Types.UInt32Array,
+    sup_nodes: Types.UInt32Array,
+    sup_sources: Types.UInt32Array,
+    sup_targets: Types.UInt32Array,
+    sup_edge_types: Types.UInt32Array,
+    node_mask: np.uint32,
+    node_wildcard_masks: Types.UInt32Array,
+    edge_mask: np.uint32,
+    edge_wildcard_masks: Types.UInt32Array,
+    require_bijection: bool,
+    undirected: bool,
+) -> tuple[bool, Types.Int32Array]:
+    """Compiled bitmask-aware VF2 subgraph/graph isomorphism solver."""
+    n_sub = len(sub_nodes)
+    n_sup = len(sup_nodes)
+    e_sub = len(sub_sources)
+    e_sup = len(sup_sources)
+
+    empty_map = np.empty(0, dtype=np.int32)
+    if require_bijection and (n_sub != n_sup or e_sub != e_sup):
+        return False, empty_map
+    if n_sub > n_sup or e_sub > e_sup:
+        return False, empty_map
+    if n_sub == 0:
+        return True, empty_map
+
+    # Fast multiset pre-check when no node wildcards are active
+    if len(node_wildcard_masks) == 0 and node_mask != np.uint32(0):
+        sub_masked = np.empty(n_sub, dtype=np.uint32)
+        sup_masked = np.empty(n_sup, dtype=np.uint32)
+        for i in range(n_sub):
+            sub_masked[i] = sub_nodes[i] & node_mask
+        for i in range(n_sup):
+            sup_masked[i] = sup_nodes[i] & node_mask
+        sub_masked.sort()
+        sup_masked.sort()
+        if require_bijection:
+            for i in range(n_sub):
+                if sub_masked[i] != sup_masked[i]:
+                    return False, empty_map
+        else:
+            j_sup = 0
+            for i in range(n_sub):
+                val = sub_masked[i]
+                while j_sup < n_sup and sup_masked[j_sup] < val:
+                    j_sup += 1
+                if j_sup >= n_sup or sup_masked[j_sup] != val:
+                    return False, empty_map
+                j_sup += 1
+
+    out_sub_p, out_sub_n, out_sub_e, in_sub_p, in_sub_n, in_sub_e = _build_adj_lists_kernel(
+        n_sub, sub_sources, sub_targets, sub_edge_types, undirected
+    )
+    out_sup_p, out_sup_n, out_sup_e, in_sup_p, in_sup_n, in_sup_e = _build_adj_lists_kernel(
+        n_sup, sup_sources, sup_targets, sup_edge_types, undirected
+    )
+
+    cand_mat = np.zeros((n_sub, n_sup), dtype=np.bool_)
+    cand_counts = np.zeros(n_sub, dtype=np.int32)
+
+    for u in range(n_sub):
+        u_val = sub_nodes[u]
+        uo_s, uo_e = int(out_sub_p[u]), int(out_sub_p[u + 1])
+        ui_s, ui_e = int(in_sub_p[u]), int(in_sub_p[u + 1])
+        u_out_deg = uo_e - uo_s
+        u_in_deg = ui_e - ui_s
+        cnt = 0
+
+        for v in range(n_sup):
+            if not _bitmask_compat_kernel(u_val, sup_nodes[v], node_mask, node_wildcard_masks):
+                continue
+            vo_s, vo_e = int(out_sup_p[v]), int(out_sup_p[v + 1])
+            vi_s, vi_e = int(in_sup_p[v]), int(in_sup_p[v + 1])
+            v_out_deg = vo_e - vo_s
+            v_in_deg = vi_e - vi_s
+
+            if require_bijection:
+                if u_out_deg != v_out_deg or u_in_deg != v_in_deg:
+                    continue
+            else:
+                if u_out_deg > v_out_deg or u_in_deg > v_in_deg:
+                    continue
+
+            # 1-hop outgoing lookahead
+            ok = True
+            for idx_u in range(uo_s, uo_e):
+                w = out_sub_n[idx_u]
+                w_val = sub_nodes[w]
+                l_sub = out_sub_e[idx_u]
+                found_nbr = False
+                for idx_v in range(vo_s, vo_e):
+                    vw = out_sup_n[idx_v]
+                    if _bitmask_compat_kernel(
+                        l_sub, out_sup_e[idx_v], edge_mask, edge_wildcard_masks
+                    ) and _bitmask_compat_kernel(w_val, sup_nodes[vw], node_mask, node_wildcard_masks):
+                        found_nbr = True
+                        break
+                if not found_nbr:
+                    ok = False
+                    break
+            if not ok:
+                continue
+
+            # 1-hop incoming lookahead
+            if not undirected:
+                for idx_u in range(ui_s, ui_e):
+                    w = in_sub_n[idx_u]
+                    w_val = sub_nodes[w]
+                    l_sub = in_sub_e[idx_u]
+                    found_nbr = False
+                    for idx_v in range(vi_s, vi_e):
+                        vw = in_sup_n[idx_v]
+                        if _bitmask_compat_kernel(
+                            l_sub, in_sup_e[idx_v], edge_mask, edge_wildcard_masks
+                        ) and _bitmask_compat_kernel(w_val, sup_nodes[vw], node_mask, node_wildcard_masks):
+                            found_nbr = True
+                            break
+                    if not found_nbr:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+
+            cand_mat[u, v] = True
+            cnt += 1
+
+        if cnt == 0:
+            return False, empty_map
+        cand_counts[u] = cnt
+
+    # Connected search ordering: start from most constrained node, then expand connected frontier
+    order = np.empty(n_sub, dtype=np.int32)
+    in_order = np.zeros(n_sub, dtype=np.bool_)
+    in_frontier = np.zeros(n_sub, dtype=np.bool_)
+
+    for step_idx in range(n_sub):
+        has_front = False
+        for u in range(n_sub):
+            if in_frontier[u] and not in_order[u]:
+                has_front = True
+                break
+        best_u = -1
+        best_cands = 1 << 30
+        best_deg = -1
+        for u in range(n_sub):
+            if in_order[u]:
+                continue
+            if has_front and not in_frontier[u]:
+                continue
+            c_u = int(cand_counts[u])
+            d_u = int(out_sub_p[u + 1] - out_sub_p[u]) + int(in_sub_p[u + 1] - in_sub_p[u])
+            if c_u < best_cands or (c_u == best_cands and d_u > best_deg):
+                best_u = u
+                best_cands = c_u
+                best_deg = d_u
+
+        order[step_idx] = best_u
+        in_order[best_u] = True
+        in_frontier[best_u] = False
+        for idx_u in range(out_sub_p[best_u], out_sub_p[best_u + 1]):
+            nb = out_sub_n[idx_u]
+            if not in_order[nb]:
+                in_frontier[nb] = True
+        for idx_u in range(in_sub_p[best_u], in_sub_p[best_u + 1]):
+            nb = in_sub_n[idx_u]
+            if not in_order[nb]:
+                in_frontier[nb] = True
+
+    # Iterative stack-based VF2 backtracking
+    mapping = np.full(n_sub, -1, dtype=np.int32)
+    used_sup = np.zeros(n_sup, dtype=np.bool_)
+    cand_cursor = np.zeros(n_sub, dtype=np.int32)
+    step = 0
+    steps_taken = 0
+    max_steps = 8192
+
+    while step >= 0:
+        if step == n_sub:
+            return True, mapping
+        u = int(order[step])
+        uo_s, uo_e = int(out_sub_p[u]), int(out_sub_p[u + 1])
+        ui_s, ui_e = int(in_sub_p[u]), int(in_sub_p[u + 1])
+
+        advanced = False
+        for v in range(int(cand_cursor[step]), n_sup):
+            if not cand_mat[u, v] or used_sup[v]:
+                continue
+            vo_s, vo_e = int(out_sup_p[v]), int(out_sup_p[v + 1])
+            vi_s, vi_e = int(in_sup_p[v]), int(in_sup_p[v + 1])
+
+            consistent = True
+            for idx_u in range(uo_s, uo_e):
+                w = int(out_sub_n[idx_u])
+                if w == u:
+                    if not _pair_edges_compat_kernel(
+                        uo_s,
+                        uo_e,
+                        u,
+                        out_sub_n,
+                        out_sub_e,
+                        vo_s,
+                        vo_e,
+                        v,
+                        out_sup_n,
+                        out_sup_e,
+                        edge_mask,
+                        edge_wildcard_masks,
+                    ):
+                        consistent = False
+                        break
+                elif mapping[w] != -1:
+                    vw = int(mapping[w])
+                    if not _pair_edges_compat_kernel(
+                        uo_s,
+                        uo_e,
+                        w,
+                        out_sub_n,
+                        out_sub_e,
+                        vo_s,
+                        vo_e,
+                        vw,
+                        out_sup_n,
+                        out_sup_e,
+                        edge_mask,
+                        edge_wildcard_masks,
+                    ):
+                        consistent = False
+                        break
+            if not consistent:
+                continue
+
+            if not undirected:
+                for idx_u in range(ui_s, ui_e):
+                    w = int(in_sub_n[idx_u])
+                    if w != u and mapping[w] != -1:
+                        vw = int(mapping[w])
+                        if not _pair_edges_compat_kernel(
+                            ui_s,
+                            ui_e,
+                            w,
+                            in_sub_n,
+                            in_sub_e,
+                            vi_s,
+                            vi_e,
+                            vw,
+                            in_sup_n,
+                            in_sup_e,
+                            edge_mask,
+                            edge_wildcard_masks,
+                        ):
+                            consistent = False
+                            break
+                if not consistent:
+                    continue
+
+            cand_cursor[step] = v + 1
+            mapping[u] = v
+            used_sup[v] = True
+            step += 1
+            if step < n_sub:
+                cand_cursor[step] = 0
+            advanced = True
+            break
+
+        if not advanced:
+            steps_taken += 1
+            if steps_taken > max_steps:
+                return False, empty_map
+            step -= 1
+            if step >= 0:
+                prev_u = int(order[step])
+                prev_v = int(mapping[prev_u])
+                used_sup[prev_v] = False
+                mapping[prev_u] = -1
+
+    return False, empty_map
+
+
+@Types.njit(parallel=True)
+def _batch_vf2_has_match_kernel(
+    sub_nodes: Types.UInt32Array,
+    sub_sources: Types.UInt32Array,
+    sub_targets: Types.UInt32Array,
+    sub_edge_types: Types.UInt32Array,
+    batch_node_types: Types.UInt32Array,
+    batch_node_offsets: Types.UInt32Array,
+    batch_edge_sources: Types.UInt32Array,
+    batch_edge_targets: Types.UInt32Array,
+    batch_edge_types: Types.UInt32Array,
+    batch_edge_offsets: Types.UInt32Array,
+    node_mask: np.uint32,
+    node_wildcard_masks: Types.UInt32Array,
+    edge_mask: np.uint32,
+    edge_wildcard_masks: Types.UInt32Array,
+    require_bijection: bool,
+    undirected: bool,
+) -> Types.BoolArray:
+    """Screen a `Graphs` batch in parallel for VF2 subgraph/isomorphism matches against `sub`."""
+    n_graphs = len(batch_node_offsets) - 1
+    out = np.zeros(n_graphs, dtype=np.bool_)
+    for g in prange(n_graphs):  # type: ignore[not-iterable]
+        n_s = int(batch_node_offsets[g])
+        n_e = int(batch_node_offsets[g + 1])
+        e_s = int(batch_edge_offsets[g])
+        e_e = int(batch_edge_offsets[g + 1])
+        n_edges = e_e - e_s
+        local_sources = np.empty(n_edges, dtype=np.uint32)
+        local_targets = np.empty(n_edges, dtype=np.uint32)
+        for k in range(n_edges):
+            local_sources[k] = np.uint32(int(batch_edge_sources[e_s + k]) - n_s)
+            local_targets[k] = np.uint32(int(batch_edge_targets[e_s + k]) - n_s)
+        found, _ = _vf2_match_kernel(
+            sub_nodes,
+            sub_sources,
+            sub_targets,
+            sub_edge_types,
+            batch_node_types[n_s:n_e],
+            local_sources,
+            local_targets,
+            batch_edge_types[e_s:e_e],
+            node_mask,
+            node_wildcard_masks,
+            edge_mask,
+            edge_wildcard_masks,
+            require_bijection,
+            undirected,
+        )
+        out[g] = found
+    return out
+
+
+@Types.njit(parallel=True)
+def _wl_smooth_embeddings_kernel(
+    features: Types.Float64Array2D,
+    node_offsets: Types.UInt32Array,
+    edge_sources: Types.UInt32Array,
+    edge_targets: Types.UInt32Array,
+    edge_offsets: Types.UInt32Array,
+    iterations: int,
+    smoothing_factor: float,
+) -> Types.Float64Array2D:
+    """Topologically smooth node features across symmetrized graph neighborhoods in parallel."""
+    total_nodes, d = features.shape
+    n_graphs = len(node_offsets) - 1
+    out_dim = (iterations + 1) * d
+    out = np.zeros((total_nodes, out_dim), dtype=np.float64)
+    if total_nodes == 0:
+        return out
+
+    alpha = smoothing_factor
+    one_minus_alpha = 1.0 - smoothing_factor
+
+    for g in prange(n_graphs):  # type: ignore[not-iterable]
+        n_s = int(node_offsets[g])
+        n_e = int(node_offsets[g + 1])
+        n_v = n_e - n_s
+        if n_v == 0:
+            continue
+
+        for u in range(n_v):
+            for col in range(d):
+                out[n_s + u, col] = features[n_s + u, col]
+
+        if iterations <= 0:
+            continue
+
+        e_s = int(edge_offsets[g])
+        e_e = int(edge_offsets[g + 1])
+        deg = np.zeros(n_v, dtype=np.float64)
+        for k in range(e_s, e_e):
+            u = int(edge_sources[k]) - n_s
+            v = int(edge_targets[k]) - n_s
+            if 0 <= u < n_v and 0 <= v < n_v:
+                deg[u] += 1.0
+                deg[v] += 1.0
+
+        inv_deg = np.zeros(n_v, dtype=np.float64)
+        for u in range(n_v):
+            if deg[u] > 0.0:
+                inv_deg[u] = 1.0 / deg[u]
+
+        nbr_sum = np.empty((n_v, d), dtype=np.float64)
+        for it in range(1, iterations + 1):
+            prev_off = (it - 1) * d
+            curr_off = it * d
+            nbr_sum.fill(0.0)
+            for k in range(e_s, e_e):
+                u = int(edge_sources[k]) - n_s
+                v = int(edge_targets[k]) - n_s
+                if 0 <= u < n_v and 0 <= v < n_v:
+                    gu = n_s + u
+                    gv = n_s + v
+                    for col in range(d):
+                        nbr_sum[u, col] += out[gv, prev_off + col]
+                        nbr_sum[v, col] += out[gu, prev_off + col]
+
+            for u in range(n_v):
+                gu = n_s + u
+                id_u = inv_deg[u]
+                for col in range(d):
+                    out[gu, curr_off + col] = one_minus_alpha * out[gu, prev_off + col] + alpha * id_u * nbr_sum[u, col]
+
+    return out
+
+
+@Types.njit
+def _emd_uniform_nd_kernel(
+    x: Types.Float64Array2D,
+    y: Types.Float64Array2D,
+) -> float:
+    """Compute exact 1-Wasserstein distance (EMD) between uniform ND point clouds `x` and `y`."""
+    n = x.shape[0]
+    m = y.shape[0]
+    if n == 0 or m == 0:
+        return 0.0 if n == m else 1.0
+    d = x.shape[1]
+
+    cost = np.empty((n, m), dtype=np.float64)
+    for u in range(n):
+        for v in range(m):
+            sq = 0.0
+            for k in range(d):
+                diff = x[u, k] - y[v, k]
+                sq += diff * diff
+            cost[u, v] = np.sqrt(sq)
+
+    if n == 1 and m == 1:
+        return float(cost[0, 0])
+    if n == 1:
+        s = 0.0
+        for v in range(m):
+            s += cost[0, v]
+        return s / float(m)
+    if m == 1:
+        s = 0.0
+        for u in range(n):
+            s += cost[u, 0]
+        return s / float(n)
+
+    # GCD(n, m) for exact integer transportation supplies and demands
+    a_g = n
+    b_g = m
+    while b_g != 0:
+        a_g, b_g = b_g, a_g % b_g
+    g = a_g
+
+    s_init = m // g
+    d_init = n // g
+    tot_flow = n * s_init
+    rem_flow = tot_flow
+
+    supply = np.full(n, s_init, dtype=np.int64)
+    demand = np.full(m, d_init, dtype=np.int64)
+    flow = np.zeros((n, m), dtype=np.int64)
+
+    pi = np.zeros(n, dtype=np.float64)
+    sigma = np.empty(m, dtype=np.float64)
+    for v in range(m):
+        min_c = cost[0, v]
+        for u in range(1, n):
+            if cost[u, v] < min_c:
+                min_c = cost[u, v]
+        sigma[v] = min_c
+
+    dist_u = np.empty(n, dtype=np.float64)
+    dist_v = np.empty(m, dtype=np.float64)
+    vis_u = np.empty(n, dtype=np.bool_)
+    vis_v = np.empty(m, dtype=np.bool_)
+    prev_u = np.empty(n, dtype=np.int32)
+    prev_v = np.empty(m, dtype=np.int32)
+
+    inf = 1e300
+    max_augs = 4 * n * m + 16
+    aug_step = 0
+
+    while rem_flow > 0 and aug_step < max_augs:
+        aug_step += 1
+        for u in range(n):
+            dist_u[u] = 0.0 if supply[u] > 0 else inf
+            vis_u[u] = False
+            prev_u[u] = -1
+        for v in range(m):
+            dist_v[v] = inf
+            vis_v[v] = False
+            prev_v[v] = -1
+
+        for _ in range(n + m):
+            best_dist = inf
+            best_is_u = True
+            best_idx = -1
+            for u in range(n):
+                if not vis_u[u] and dist_u[u] < best_dist:
+                    best_dist = dist_u[u]
+                    best_is_u = True
+                    best_idx = u
+            for v in range(m):
+                if not vis_v[v] and dist_v[v] < best_dist:
+                    best_dist = dist_v[v]
+                    best_is_u = False
+                    best_idx = v
+
+            if best_idx == -1:
+                break
+
+            if best_is_u:
+                u = best_idx
+                vis_u[u] = True
+                du = dist_u[u]
+                pu = pi[u]
+                for v in range(m):
+                    if not vis_v[v]:
+                        rc = cost[u, v] + pu - sigma[v]
+                        if rc < 0.0:
+                            rc = 0.0
+                        nd = du + rc
+                        if nd < dist_v[v]:
+                            dist_v[v] = nd
+                            prev_v[v] = u
+            else:
+                v = best_idx
+                vis_v[v] = True
+                dv = dist_v[v]
+                sv = sigma[v]
+                for u in range(n):
+                    if not vis_u[u] and flow[u, v] > 0:
+                        rc = -cost[u, v] + sv - pi[u]
+                        if rc < 0.0:
+                            rc = 0.0
+                        nd = dv + rc
+                        if nd < dist_u[u]:
+                            dist_u[u] = nd
+                            prev_u[u] = v
+
+        best_sink = -1
+        best_sink_dist = inf
+        for v in range(m):
+            if demand[v] > 0 and prev_v[v] != -1 and dist_v[v] < best_sink_dist:
+                best_sink_dist = dist_v[v]
+                best_sink = v
+
+        if best_sink == -1:
+            break
+
+        for u in range(n):
+            if vis_u[u] and dist_u[u] < best_sink_dist:
+                pi[u] += dist_u[u] - best_sink_dist
+        for v in range(m):
+            if vis_v[v] and dist_v[v] < best_sink_dist:
+                sigma[v] += dist_v[v] - best_sink_dist
+
+        delta = demand[best_sink]
+        curr_v = best_sink
+        while True:
+            curr_u = int(prev_v[curr_v])
+            if prev_u[curr_u] == -1:
+                if supply[curr_u] < delta:
+                    delta = supply[curr_u]
+                break
+            next_v = int(prev_u[curr_u])
+            if flow[curr_u, next_v] < delta:
+                delta = flow[curr_u, next_v]
+            curr_v = next_v
+
+        demand[best_sink] -= delta
+        rem_flow -= int(delta)
+        curr_v = best_sink
+        while True:
+            curr_u = int(prev_v[curr_v])
+            flow[curr_u, curr_v] += delta
+            if prev_u[curr_u] == -1:
+                supply[curr_u] -= delta
+                break
+            next_v = int(prev_u[curr_u])
+            flow[curr_u, next_v] -= delta
+            curr_v = next_v
+
+    total_cost = 0.0
+    for u in range(n):
+        for v in range(m):
+            if flow[u, v] > 0:
+                total_cost += float(flow[u, v]) * cost[u, v]
+    return total_cost / float(tot_flow)
+
+
+@Types.njit(parallel=True)
+def _batch_wwl_distance_kernel(
+    embeddings: Types.Float64Array2D,
+    node_offsets: Types.UInt32Array,
+) -> Types.Float64Array2D:
+    """Compute pairwise ND 1-Wasserstein distances across smoothed graph node embeddings in parallel."""
+    n_graphs = len(node_offsets) - 1
+    dist_matrix = np.zeros((n_graphs, n_graphs), dtype=np.float64)
+    if n_graphs == 0:
+        return dist_matrix
+
+    for i in prange(n_graphs):  # type: ignore[not-iterable]
+        s_i = int(node_offsets[i])
+        e_i = int(node_offsets[i + 1])
+        x_i = embeddings[s_i:e_i]
+        for j in range(i + 1, n_graphs):
+            s_j = int(node_offsets[j])
+            e_j = int(node_offsets[j + 1])
+            d = _emd_uniform_nd_kernel(x_i, embeddings[s_j:e_j])
+            dist_matrix[i, j] = d
+            dist_matrix[j, i] = d
+
+    return dist_matrix

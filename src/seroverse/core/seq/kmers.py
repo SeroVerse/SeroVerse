@@ -10,20 +10,20 @@ from dataclasses import dataclass, replace
 from typing import Self
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from seroverse.core.align.score import SubstitutionMatrix, _score_ungapped_diagonal
 from seroverse.core.align.seeds import Seeds
-from seroverse.core.collections import Int32Array, UInt8Array, UInt32Array, UInt64Array
 from seroverse.core.seq.alphabet import Alphabet
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
+from seroverse.core.types import Types
 
 type _SketchSoA = tuple[
-    Int32Array,
-    Int32Array,
-    UInt64Array,
-    UInt32Array,
-    UInt32Array,
+    Types.Int32Array,
+    Types.Int32Array,
+    Types.UInt64Array,
+    Types.UInt32Array,
+    Types.UInt32Array,
 ]
 
 
@@ -45,16 +45,16 @@ class BaseKmerIndex:
         lut (UInt8Array | None): Optional custom lookup table.
     """
 
-    hashes: UInt64Array
-    seq_indices: UInt32Array
-    positions: UInt32Array
-    offsets: Int32Array
-    lengths: Int32Array
+    hashes: Types.UInt64Array
+    seq_indices: Types.UInt32Array
+    positions: Types.UInt32Array
+    offsets: Types.Int32Array
+    lengths: Types.Int32Array
     n_seqs: int = 0
     is_sorted: bool = False
     k: int = 10
     alphabet: Alphabet = Alphabet.DNA
-    lut: UInt8Array | None = None
+    lut: Types.UInt8Array | None = None
 
     def __len__(self) -> int:
         r"""Return the number of indexed sequences."""
@@ -66,7 +66,7 @@ class BaseKmerIndex:
         return len(self.hashes)
 
     @property
-    def indptr(self) -> UInt32Array:
+    def indptr(self) -> Types.UInt32Array:
         r"""CSR-compatible $(N + 1)$-length index pointer array (`[0, *cumsum(lengths)]`)."""
         n = len(self.offsets)
         if n == 0:
@@ -87,11 +87,11 @@ class BaseKmerIndex:
             lengths=np.empty(0, dtype=np.int32),
         )
 
-    def _extract_soa(self, batch: Sequences) -> _SketchSoA:
+    def _extract_soa(self, batch: SeqRecords) -> _SketchSoA:
         r"""Extract `(offsets, lengths, hashes, seq_indices, positions)` SoA arrays from `batch`."""
         raise NotImplementedError
 
-    def _populate(self, batch: Sequences, *, sort_by_hash: bool = False) -> Self:
+    def _populate(self, batch: SeqRecords, *, sort_by_hash: bool = False) -> Self:
         r"""Populate a new index instance from `batch` using this instance's configured parameters."""
         if len(batch) == 0:
             return replace(
@@ -136,15 +136,15 @@ class BaseKmerIndex:
         sorted_h, sorted_s, sorted_p = _radix_sort_soa(self.hashes, self.seq_indices, self.positions)
         return replace(self, hashes=sorted_h, seq_indices=sorted_s, positions=sorted_p, is_sorted=True)
 
-    def _build_queries(self, queries: Sequences) -> Self:
+    def _build_queries(self, queries: SeqRecords) -> Self:
         r"""Build unsorted query index with parameters matching `self`."""
         return self._populate(queries, sort_by_hash=False)
 
-    def _prep_queries(self, queries: BaseKmerIndex | Sequences) -> BaseKmerIndex:
+    def _prep_queries(self, queries: BaseKmerIndex | SeqRecords) -> BaseKmerIndex:
         r"""Prepare and validate query index against target index state."""
         if not self.is_sorted:
             raise ValueError("Target index must be sorted by hash for binary search. Build it with sort_by_hash=True.")
-        if isinstance(queries, Sequences):
+        if isinstance(queries, SeqRecords):
             queries = self._build_queries(queries)
         if queries.is_sorted:
             raise ValueError("Query index must NOT be sorted by hash. Build it with sort_by_hash=False.")
@@ -181,18 +181,18 @@ class BaseKmerIndex:
 
     def _search(
         self,
-        queries: BaseKmerIndex | Sequences | None,
+        queries: BaseKmerIndex | SeqRecords | None,
         min_score: int,
         mode: int,
-        query_seqs: Sequences | None,
-        target_seqs: Sequences | None,
+        query_seqs: SeqRecords | None,
+        target_seqs: SeqRecords | None,
         matrix: SubstitutionMatrix | None,
     ) -> Seeds:
         r"""Execute hash-range intersection and seed extraction (`mode`: 0=top_hits, 1=aggregated, 2=raw anchors)."""
         if (queries is not None and len(queries) == 0) or len(self.hashes) == 0:
             return Seeds.empty()
 
-        q_seqs_eff = queries if isinstance(queries, Sequences) else query_seqs
+        q_seqs_eff = queries if isinstance(queries, SeqRecords) else query_seqs
         if queries is None:
             q_hashes, q_positions, t_hashes, t_seq_indices, t_positions, q_offsets = self._prep_self_hits()
             num_queries = self.n_seqs
@@ -236,17 +236,17 @@ class BaseKmerIndex:
 
     def top_hits(
         self,
-        queries: BaseKmerIndex | Sequences | None = None,
+        queries: BaseKmerIndex | SeqRecords | None = None,
         min_score: int = 1,
         *,
-        query_seqs: Sequences | None = None,
-        target_seqs: Sequences | None = None,
+        query_seqs: SeqRecords | None = None,
+        target_seqs: SeqRecords | None = None,
         matrix: SubstitutionMatrix | None = None,
     ) -> Seeds:
         r"""Find the single best-matching target sequence for each query sequence.
 
         Args:
-            queries (BaseKmerIndex | Sequences | None): Query sequences or index. If None, queries itself.
+            queries (BaseKmerIndex | SeqRecords | None): Query sequences or index. If None, queries itself.
             min_score (int): Minimum match score threshold. Defaults to 1.
             query_seqs (Sequences | None): Optional query sequences for ungapped diagonal tie-breaking.
             target_seqs (Sequences | None): Optional target sequences for ungapped diagonal tie-breaking.
@@ -259,12 +259,12 @@ class BaseKmerIndex:
 
     def hits(
         self,
-        queries: BaseKmerIndex | Sequences | None = None,
+        queries: BaseKmerIndex | SeqRecords | None = None,
         min_score: int = 1,
         *,
         aggregate: bool = True,
-        query_seqs: Sequences | None = None,
-        target_seqs: Sequences | None = None,
+        query_seqs: SeqRecords | None = None,
+        target_seqs: SeqRecords | None = None,
         matrix: SubstitutionMatrix | None = None,
     ) -> Seeds:
         r"""Find all matching target sequences or individual anchors for each query sequence.
@@ -277,7 +277,7 @@ class BaseKmerIndex:
         consumption by [`Chainer`][seroverse.core.align.chaining.Chainer].
 
         Args:
-            queries (BaseKmerIndex | Sequences | None): Query sequence index or raw sequences. If None, queries itself.
+            queries (BaseKmerIndex | SeqRecords | None): Query sequence index or raw sequences. If None, queries itself.
             min_score (int): Minimum shared k-mer count required for a `(query, target)` pair. Defaults to 1.
             aggregate (bool): If True, aggregate hits per `(query, target)` pair into a consensus diagonal seed.
                 If False, return all individual `(q_pos, t_pos, span)` anchor occurrences sorted for collinear
@@ -308,7 +308,7 @@ class FracMinHashIndex(BaseKmerIndex):
     canonical: bool = True
     bits_per_char: int = 2
 
-    def _extract_soa(self, batch: Sequences) -> _SketchSoA:
+    def _extract_soa(self, batch: SeqRecords) -> _SketchSoA:
         r"""Extract FracMinHash SoA buffers from `batch`."""
         kernel_lut = self.lut if self.lut is not None else self.alphabet.kmer_lut
         return _extract_fracminhash_kernel(
@@ -325,19 +325,19 @@ class FracMinHashIndex(BaseKmerIndex):
     @classmethod
     def build(
         cls,
-        batch: Sequences,
+        batch: SeqRecords,
         k: int | None = None,
         alphabet: Alphabet = Alphabet.DNA,
         scaled: int = 100,
         canonical: bool | None = None,
         sort_by_hash: bool = False,
-        lut: UInt8Array | None = None,
+        lut: Types.UInt8Array | None = None,
         bits_per_char: int | None = None,
     ) -> FracMinHashIndex:
         r"""Build a FracMinHashIndex from sequence batch.
 
         Args:
-            batch (Sequences): Input sequence collection.
+            batch (SeqRecords): Input sequence collection.
             k (int | None): K-mer length. Defaults to alphabet default_k.
             alphabet (Alphabet): Alphabet instance. Defaults to `Alphabet.DNA`.
             scaled (int): Sampling scale factor. Defaults to 100.
@@ -389,7 +389,7 @@ class RandstrobeIndex(BaseKmerIndex):
     w_min: int = 1
     w_max: int = 5
 
-    def _extract_soa(self, batch: Sequences) -> _SketchSoA:
+    def _extract_soa(self, batch: SeqRecords) -> _SketchSoA:
         r"""Extract Randstrobe SoA buffers from `batch`."""
         kernel_lut = self.lut if self.lut is not None else self.alphabet.kmer_lut
         return _extract_randstrobes_kernel(
@@ -399,19 +399,19 @@ class RandstrobeIndex(BaseKmerIndex):
     @classmethod
     def build(
         cls,
-        batch: Sequences,
+        batch: SeqRecords,
         k: int = 10,
         s: int = 5,
         w_min: int = 1,
         w_max: int = 5,
         alphabet: Alphabet = Alphabet.MMSEQS12,
         sort_by_hash: bool = False,
-        lut: UInt8Array | None = None,
+        lut: Types.UInt8Array | None = None,
     ) -> RandstrobeIndex:
         r"""Build a RandstrobeIndex from sequence batch.
 
         Args:
-            batch (Sequences): Input sequence collection.
+            batch (SeqRecords): Input sequence collection.
             k (int): K-mer length. Defaults to 10.
             s (int): Sub-k-mer size. Defaults to 5.
             w_min (int): Min syncmer window bound. Defaults to 1.
@@ -434,7 +434,7 @@ class RandstrobeIndex(BaseKmerIndex):
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True, inline="always")
+@Types.njit(inline="always")
 def _splitmix64(x: np.uint64) -> np.uint64:
     r"""Fast, invertible 64-bit integer mixing function for randomizing hashes."""
     x = np.uint64(x + np.uint64(0x9E3779B97F4A7C15))
@@ -443,12 +443,12 @@ def _splitmix64(x: np.uint64) -> np.uint64:
     return x ^ (x >> np.uint64(31))
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _radix_sort_soa(
-    hashes: np.ndarray,
-    seq_indices: np.ndarray,
-    positions: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    hashes: Types.UInt64Array,
+    seq_indices: Types.UInt32Array,
+    positions: Types.UInt32Array,
+) -> tuple[Types.UInt64Array, Types.UInt32Array, Types.UInt32Array]:
     r"""In-place radix sort of SoA arrays by 64-bit hash values."""
     n = len(hashes)
     src_h, dst_h = hashes.copy(), np.empty(n, dtype=np.uint64)
@@ -483,15 +483,15 @@ def _radix_sort_soa(
     return src_h, src_s, src_p
 
 
-@njit(cache=True, nogil=True)
+@Types.njit
 def _alloc_sketch_buffers(
-    counts: np.ndarray[tuple[int], np.dtype[np.int32]],
+    counts: Types.Int32Array,
 ) -> tuple[
     int,
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.uint64]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
+    Types.Int32Array,
+    Types.UInt64Array,
+    Types.UInt32Array,
+    Types.UInt32Array,
 ]:
     r"""Compute sequence offsets and allocate flat SoA sketch output arrays inside Numba."""
     n_seqs = len(counts)
@@ -509,21 +509,21 @@ def _alloc_sketch_buffers(
     )
 
 
-@njit(cache=True, nogil=True, inline="always")
+@Types.njit(inline="always")
 def _scan_minhashes_seq(
-    seqs: np.ndarray,
+    seqs: Types.UInt8Array,
     seq_start: int,
     seq_len: int,
-    lut: np.ndarray,
+    lut: Types.UInt8Array,
     k: int,
     scaled: int,
     canonical: bool,
     bits_per_char: int,
     seq_idx: int,
     out_s: int,
-    out_hashes: np.ndarray,
-    out_seq_indices: np.ndarray,
-    out_positions: np.ndarray,
+    out_hashes: Types.UInt64Array,
+    out_seq_indices: Types.UInt32Array,
+    out_positions: Types.UInt32Array,
     populate: bool,
 ) -> int:
     r"""Scan rolling k-mers for a single sequence; count or populate records."""
@@ -565,12 +565,12 @@ def _scan_minhashes_seq(
     return count
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _extract_fracminhash_kernel(
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lut: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    seqs: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
+    lut: Types.UInt8Array,
     k: int,
     scaled: int,
     canonical: bool,
@@ -624,8 +624,8 @@ def _extract_fracminhash_kernel(
     return out_offsets, counts, out_hashes, out_seq_indices, out_positions
 
 
-@njit(cache=True, nogil=True, inline="always")
-def _is_open_syncmer(seqs: np.ndarray, pos: int, lut: np.ndarray, k: int, s: int) -> bool:
+@Types.njit(inline="always")
+def _is_open_syncmer(seqs: Types.UInt8Array, pos: int, lut: Types.UInt8Array, k: int, s: int) -> bool:
     r"""Return True if the k-mer starting at `pos` is an open syncmer (minimum s-mer at offset 0 or k - s)."""
     min_s_hash = ~np.uint64(0)
     min_s_idx = -1
@@ -640,21 +640,21 @@ def _is_open_syncmer(seqs: np.ndarray, pos: int, lut: np.ndarray, k: int, s: int
     return min_s_idx == 0 or min_s_idx == (k - s)
 
 
-@njit(cache=True, nogil=True, inline="always")
+@Types.njit(inline="always")
 def _scan_randstrobes_seq(
-    seqs: np.ndarray,
+    seqs: Types.UInt8Array,
     seq_start: int,
     seq_len: int,
-    lut: np.ndarray,
+    lut: Types.UInt8Array,
     k: int,
     s: int,
     w_min: int,
     w_max: int,
     seq_idx: int,
     out_s: int,
-    out_hashes: np.ndarray,
-    out_seq_indices: np.ndarray,
-    out_positions: np.ndarray,
+    out_hashes: Types.UInt64Array,
+    out_seq_indices: Types.UInt32Array,
+    out_positions: Types.UInt32Array,
     populate: bool,
 ) -> int:
     r"""Scan open syncmers and link order-2 randstrobes for a single sequence."""
@@ -701,12 +701,12 @@ def _scan_randstrobes_seq(
     return out_idx - out_s
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _extract_randstrobes_kernel(
-    seqs: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lut: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    seqs: Types.UInt8Array,
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
+    lut: Types.UInt8Array,
     k: int,
     s: int,
     w_min: int,
@@ -747,8 +747,8 @@ def _extract_randstrobes_kernel(
     return out_offsets, counts, out_hashes, out_seq_indices, out_positions
 
 
-@njit(cache=True, nogil=True)
-def _compute_query_offsets(q_seq_indices: np.ndarray, num_queries: int) -> np.ndarray[tuple[int], np.dtype[np.uint32]]:
+@Types.njit
+def _compute_query_offsets(q_seq_indices: Types.UInt32Array, num_queries: int) -> Types.UInt32Array:
     r"""Find boundary indices for each query sequence in flat hash array."""
     q_offsets = np.zeros(num_queries + 1, dtype=np.uint32)
     n = len(q_seq_indices)
@@ -767,28 +767,28 @@ def _compute_query_offsets(q_seq_indices: np.ndarray, num_queries: int) -> np.nd
     return q_offsets
 
 
-@njit(cache=True, nogil=True, inline="always")
+@Types.njit(inline="always")
 def _unpack_diag(key: np.uint64) -> np.int32:
     r"""Unpack signed int32 diagonal from lower 32 bits of a sorted uint64 key."""
     return np.int32(np.uint32(key & np.uint64(0xFFFFFFFF)) ^ np.uint32(0x80000000))
 
 
-@njit(cache=True, nogil=True, inline="always")
+@Types.njit(inline="always")
 def _modal_diagonal_from_run(
-    keys: np.ndarray[tuple[int], np.dtype[np.uint64]],
-    sorted_q: np.ndarray[tuple[int], np.dtype[np.int32]],
-    sorted_t: np.ndarray[tuple[int], np.dtype[np.int32]],
+    keys: Types.UInt64Array,
+    sorted_q: Types.Int32Array,
+    sorted_t: Types.Int32Array,
     run_start: int,
     run_end: int,
     tol: int,
     has_seqs: bool,
-    q_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    q_data: Types.UInt8Array,
     s1: int,
     l1: int,
-    t_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
+    t_data: Types.UInt8Array,
     s2: int,
     l2: int,
-    lut: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    lut: Types.Int8Array2D,
 ) -> tuple[np.int32, np.int32, np.int32]:
     r"""Select consensus diagonal and representative `(q_pos, t_pos)` from a sorted run of `(t_id, diag)` keys."""
     d_first = _unpack_diag(keys[run_start])
@@ -823,11 +823,11 @@ def _modal_diagonal_from_run(
     return best_d, best_q, best_t
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _find_hash_ranges_kernel(
-    q_hashes: np.ndarray[tuple[int], np.dtype[np.uint64]],
-    t_hashes: np.ndarray[tuple[int], np.dtype[np.uint64]],
-) -> tuple[np.ndarray[tuple[int], np.dtype[np.uint32]], np.ndarray[tuple[int], np.dtype[np.uint32]]]:
+    q_hashes: Types.UInt64Array,
+    t_hashes: Types.UInt64Array,
+) -> tuple[Types.UInt32Array, Types.UInt32Array]:
     r"""Find `[start, end)` range in sorted `t_hashes` for every hash in `q_hashes` in a single pass."""
     n_q, t_len = len(q_hashes), len(t_hashes)
     match_starts = np.empty(n_q, dtype=np.uint32)
@@ -851,20 +851,20 @@ def _find_hash_ranges_kernel(
     return match_starts, match_ends
 
 
-@njit(cache=True, nogil=True, inline="always")
+@Types.njit(inline="always")
 def _pack_sorted_query_hits(
     start: int,
     end: int,
-    q_positions: np.ndarray,
-    match_starts: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    match_ends: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    t_seq_indices: np.ndarray,
-    t_positions: np.ndarray,
+    q_positions: Types.UInt32Array,
+    match_starts: Types.UInt32Array,
+    match_ends: Types.UInt32Array,
+    t_seq_indices: Types.UInt32Array,
+    t_positions: Types.UInt32Array,
     by_diag: bool,
 ) -> tuple[
-    np.ndarray[tuple[int], np.dtype[np.uint64]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
+    Types.UInt64Array,
+    Types.Int32Array,
+    Types.Int32Array,
 ]:
     r"""Pack all seed matches for a single query into sorted `(keys, q_pos, t_pos)` arrays."""
     raw_count = 0
@@ -902,32 +902,32 @@ def _pack_sorted_query_hits(
     return sorted_keys, sorted_q, sorted_t
 
 
-@njit(parallel=True, cache=True, nogil=True)
+@Types.njit(parallel=True)
 def _search_seeds_kernel(
-    q_positions: np.ndarray,
-    q_offsets: np.ndarray[tuple[int], np.dtype[np.uint32]],
+    q_positions: Types.UInt32Array,
+    q_offsets: Types.UInt32Array,
     num_queries: int,
-    match_starts: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    match_ends: np.ndarray[tuple[int], np.dtype[np.uint32]],
-    t_seq_indices: np.ndarray,
-    t_positions: np.ndarray,
+    match_starts: Types.UInt32Array,
+    match_ends: Types.UInt32Array,
+    t_seq_indices: Types.UInt32Array,
+    t_positions: Types.UInt32Array,
     min_score: int,
     mode: int,
     has_seqs: bool,
-    q_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    q_seq_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    q_seq_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_data: np.ndarray[tuple[int], np.dtype[np.uint8]],
-    t_seq_offsets: np.ndarray[tuple[int], np.dtype[np.int32]],
-    t_seq_lengths: np.ndarray[tuple[int], np.dtype[np.int32]],
-    lut: np.ndarray[tuple[int, int], np.dtype[np.int8]],
+    q_data: Types.UInt8Array,
+    q_seq_offsets: Types.Int32Array,
+    q_seq_lengths: Types.Int32Array,
+    t_data: Types.UInt8Array,
+    t_seq_offsets: Types.Int32Array,
+    t_seq_lengths: Types.Int32Array,
+    lut: Types.Int8Array2D,
 ) -> tuple[
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.uint32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
-    np.ndarray[tuple[int], np.dtype[np.int32]],
+    Types.UInt32Array,
+    Types.UInt32Array,
+    Types.UInt32Array,
+    Types.Int32Array,
+    Types.Int32Array,
+    Types.Int32Array,
 ]:
     r"""Unified two-pass parallel kernel for `top_hits` (`mode=0`), aggregated `hits` (`mode=1`), and raw anchors (`mode=2`)."""
     counts = np.zeros(num_queries, dtype=np.uint32)

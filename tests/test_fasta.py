@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from seroverse.core.io.fasta import FastaReader
+from seroverse.core.io.fasta import FastaReader, FastaWriter
+from seroverse.core.seq.seq import SeqRecord, SeqRecords
 
 
 def test_fasta_reader_stream_and_load_consistency(assembly_path: Path) -> None:
@@ -82,3 +83,24 @@ def test_fasta_reader_empty_inputs() -> None:
     empty_batch = FastaReader.from_bytes(b"no fasta header here\njust text").load()
     assert len(empty_batch) == 0
     assert empty_batch.seqs.dtype == np.uint8
+
+
+def test_fasta_writer_stream_batch_and_file_roundtrip(tmp_path: Path) -> None:
+    """`FastaWriter` must support scalar/batch streaming, `use_indices`, and compressed file round-trips."""
+    r1 = SeqRecord(b"s1", b"ACGT")
+    r2 = SeqRecord(b"s2", b"TTAA")
+    batch = SeqRecords.from_list([r1, r2])
+
+    assert r1.to_fasta() == b">s1\nACGT\n"
+    assert batch.to_fasta() == b">s1\nACGT\n>s2\nTTAA\n"
+    assert batch.to_fasta(use_indices=True) == b">0\nACGT\n>1\nTTAA\n"
+
+    with FastaWriter.from_bytes(use_indices=True) as writer:
+        writer.write(r1)
+        writer.write([r2])
+        assert writer.getvalue() == b">0\nACGT\n>1\nTTAA\n"
+
+    out_path = tmp_path / "test_seqs.fna.zst"
+    FastaWriter.to_file(out_path, batch)
+    loaded = FastaReader.from_file(out_path).load()
+    assert loaded == batch

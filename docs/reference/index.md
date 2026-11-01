@@ -20,7 +20,7 @@ The **`seroverse`** package provides the core Structure-of-Arrays (SoA) containe
 
     ---
 
-    SoA container protocols (`BatchedContainer`, `RaggedArrayContainer`), genomic `Intervals`, `GenomeAssembly`, `Alphabet` & `Sequences`, `RandstrobeIndex`, `PairwiseAligner`, `Clusterer` (MCL & CD-HIT), `CSR` & `RelationalCSR`, `Graph` & `Graphs`, `GraphAligner`, `ArborescenceSolver` (`Arborescence`, `Arborescences`), `RelationalMPNN`, and `LayoutEngine`.
+    SoA container protocols (`Batch`, `RaggedBatch`), genomic `Intervals`, `GenomeAssembly`, `Alphabet` & `SeqRecords`, `RandstrobeIndex`, `PairwiseAligner`, `Clusterer` (MCL & CD-HIT), `CSR` & `RelationalCSR`, `Graph` & `Graphs`, `GraphAligner`, `ArborescenceSolver` (`Arborescence`, `Arborescences`), `RelationalMPNN`, and `LayoutEngine`.
 
 -   :lucide-cloud-download: **[`seroverse.client`](client.md)**
 

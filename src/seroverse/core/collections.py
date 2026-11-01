@@ -1,18 +1,3 @@
-r"""Base classes, 1D NumPy array type aliases, and Numba kernels for Structure-of-Arrays (SoA) containers.
-
-This module defines the concrete base classes ([`ScalarView`][seroverse.core.collections.ScalarView],
-[`BatchedContainer`][seroverse.core.collections.BatchedContainer],
-[`RaggedArrayContainer`][seroverse.core.collections.RaggedArrayContainer],
-[`Spec`][seroverse.core.collections.Spec], [`SpecContainer`][seroverse.core.collections.SpecContainer],
-and [`SpecEnum`][seroverse.core.collections.SpecEnum]) and 1D NumPy array type aliases
-that govern high-performance, vectorized containers and compiled ontology registries across SeroVerse.
-
-Upon class definition (`__init_subclass__`), [`BatchedContainer`][seroverse.core.collections.BatchedContainer]
-and [`RaggedArrayContainer`][seroverse.core.collections.RaggedArrayContainer] inspect `@dataclass` field
-annotations, verify that all stored container fields are NumPy arrays, register their `np.dtype`s,
-and automatically provide `__len__`, `__getitem__`, `__eq__`, `filter`, `empty`, `concat`, and `from_list`.
-"""
-
 import annotationlib
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -21,64 +6,13 @@ from enum import Enum, IntEnum
 from typing import Any, ClassVar, Self, TypeAliasType, get_args, get_origin, overload
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
-# 1D NumPy Array Type Aliases ------------------------------------------------------------------------------------------
-type BoolArray = np.ndarray[tuple[int], np.dtype[np.bool_]]
-type Int8Array = np.ndarray[tuple[int], np.dtype[np.int8]]
-type UInt8Array = np.ndarray[tuple[int], np.dtype[np.uint8]]
-type Int16Array = np.ndarray[tuple[int], np.dtype[np.int16]]
-type UInt16Array = np.ndarray[tuple[int], np.dtype[np.uint16]]
-type Int32Array = np.ndarray[tuple[int], np.dtype[np.int32]]
-type UInt32Array = np.ndarray[tuple[int], np.dtype[np.uint32]]
-type Int64Array = np.ndarray[tuple[int], np.dtype[np.int64]]
-type UInt64Array = np.ndarray[tuple[int], np.dtype[np.uint64]]
-type Float32Array = np.ndarray[tuple[int], np.dtype[np.float32]]
-type Float64Array = np.ndarray[tuple[int], np.dtype[np.float64]]
-type BytesArray = np.ndarray[tuple[int], np.dtype[np.bytes_]]
-
-_STRING_DTYPE_MAP: dict[str, np.dtype[Any]] = {
-    "BoolArray": np.dtype(np.bool_),
-    "Int8Array": np.dtype(np.int8),
-    "UInt8Array": np.dtype(np.uint8),
-    "Int16Array": np.dtype(np.int16),
-    "UInt16Array": np.dtype(np.uint16),
-    "Int32Array": np.dtype(np.int32),
-    "UInt32Array": np.dtype(np.uint32),
-    "Int64Array": np.dtype(np.int64),
-    "UInt64Array": np.dtype(np.uint64),
-    "Float32Array": np.dtype(np.float32),
-    "Float64Array": np.dtype(np.float64),
-    "BytesArray": np.dtype("S"),
-    "np.bool_": np.dtype(np.bool_),
-    "bool_": np.dtype(np.bool_),
-    "np.int8": np.dtype(np.int8),
-    "int8": np.dtype(np.int8),
-    "np.uint8": np.dtype(np.uint8),
-    "uint8": np.dtype(np.uint8),
-    "np.int16": np.dtype(np.int16),
-    "int16": np.dtype(np.int16),
-    "np.uint16": np.dtype(np.uint16),
-    "uint16": np.dtype(np.uint16),
-    "np.int32": np.dtype(np.int32),
-    "int32": np.dtype(np.int32),
-    "np.uint32": np.dtype(np.uint32),
-    "uint32": np.dtype(np.uint32),
-    "np.int64": np.dtype(np.int64),
-    "int64": np.dtype(np.int64),
-    "np.uint64": np.dtype(np.uint64),
-    "uint64": np.dtype(np.uint64),
-    "np.float32": np.dtype(np.float32),
-    "float32": np.dtype(np.float32),
-    "np.float64": np.dtype(np.float64),
-    "float64": np.dtype(np.float64),
-    "np.bytes_": np.dtype("S"),
-    "bytes_": np.dtype("S"),
-}
+from seroverse.core.types import Types
 
 
 # Classes --------------------------------------------------------------------------------------------------------------
-class ScalarView:
+class View:
     r"""Concrete base class for immutable scalar views extracted from a [`BatchedContainer`][seroverse.core.collections.BatchedContainer].
 
     All scalar views are `@dataclass(frozen=True, slots=True)` records representing a single
@@ -96,7 +30,7 @@ class ScalarView:
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if "__dataclass_fields__" in cls.__dict__:
-            cls.__eq__ = ScalarView._dataclass_eq  # type: ignore[method-assign]
+            cls.__eq__ = View._dataclass_eq  # type: ignore[method-assign]
 
     def _dataclass_eq(self, other: object) -> bool:
         r"""Compare two ScalarView instances, handling both scalar and `np.ndarray` fields safely."""
@@ -123,7 +57,7 @@ class ScalarView:
         return {f.name: getattr(self, f.name) for f in fields(self)}
 
 
-class BatchedContainer[T: ScalarView = ScalarView]:
+class Batch[T: View = View]:
     r"""Concrete generic base class for Structure-of-Arrays (SoA) batch containers.
 
     Subclasses must be `@dataclass(frozen=True, slots=True)` classes whose stored fields are all
@@ -142,7 +76,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
     __slots__ = ()
     __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
     _field_dtypes: ClassVar[dict[str, np.dtype[Any]]] = {}
-    _nested_fields: ClassVar[dict[str, type[BatchedContainer[Any]]]] = {}
+    _nested_fields: ClassVar[dict[str, type[Batch[Any]]]] = {}
     _all_fields: ClassVar[tuple[str, ...]] = ()
     _primary_field: ClassVar[str] = ""
     _scalar_type: ClassVar[type[Any] | None] = None
@@ -154,25 +88,28 @@ class BatchedContainer[T: ScalarView = ScalarView]:
         cls,
         annotation: Any,
         field_name: str,
-    ) -> np.dtype[Any] | type[BatchedContainer[Any]]:
-        r"""Resolve a `BatchedContainer` field annotation to either a 1D `np.dtype` or a nested `BatchedContainer` subclass.
+    ) -> np.dtype[Any] | type[Batch[Any]]:
+        r"""Resolve a `Batch` field annotation to either a 1D `np.dtype` or a nested `Batch` subclass.
 
         Args:
-            annotation: Field type annotation (e.g. `Int32Array` or `Intervals`).
+            annotation: Field type annotation (e.g. `Types.Int32Array` or `Intervals`).
             cls: Container class being inspected.
             field_name: Name of the field being inspected.
 
         Returns:
-            np.dtype[Any] | type[BatchedContainer[Any]]: Resolved NumPy dtype or nested `BatchedContainer` class.
+            np.dtype[Any] | type[Batch[Any]]: Resolved NumPy dtype or nested `Batch` class.
 
         Raises:
-            TypeError: If the field is neither a 1D NumPy array nor a `BatchedContainer` subclass.
+            TypeError: If the field is neither a 1D NumPy array nor a `Batch` subclass.
         """
         ann = annotation
+        if (dt := Types.resolve_dtype(ann)) is not None:
+            return dt
+
         if isinstance(ann, annotationlib.ForwardRef):
             mod = sys.modules.get(cls.__module__)
             ann = getattr(mod, ann.__forward_arg__, ann.__forward_arg__) if mod is not None else ann.__forward_arg__
-        elif isinstance(ann, str) and ann not in _STRING_DTYPE_MAP and "ndarray" not in ann:
+        elif isinstance(ann, str):
             mod = sys.modules.get(cls.__module__)
             if mod is not None and hasattr(mod, ann):
                 ann = getattr(mod, ann)
@@ -180,42 +117,18 @@ class BatchedContainer[T: ScalarView = ScalarView]:
         while isinstance(ann, TypeAliasType):
             ann = ann.__value__
 
-        if isinstance(ann, type) and issubclass(ann, BatchedContainer):
+        if isinstance(ann, type) and issubclass(ann, Batch):
             return ann
 
         origin = get_origin(ann)
-        if origin is not None and isinstance(origin, type) and issubclass(origin, BatchedContainer):
+        if origin is not None and isinstance(origin, type) and issubclass(origin, Batch):
             return origin
 
-        if isinstance(ann, str):
-            if ann in _STRING_DTYPE_MAP:
-                return _STRING_DTYPE_MAP[ann]
-            if "ndarray" in ann:
-                for key, dt in _STRING_DTYPE_MAP.items():
-                    if f"dtype[{key}]" in ann:
-                        return dt
-            raise TypeError(
-                f"{cls.__name__}.{field_name} must be annotated as a 1D NumPy array or BatchedContainer, got {annotation!r}"
-            )
-
-        if origin is np.ndarray:
-            args = get_args(ann)
-            if len(args) >= 2:
-                dtype_arg = args[1]
-                dtype_inner = get_args(dtype_arg)
-                if dtype_inner:
-                    scalar_t = dtype_inner[0]
-                    if scalar_t is np.bytes_:
-                        return np.dtype("S")
-                    if isinstance(scalar_t, type) and issubclass(scalar_t, np.generic):
-                        return np.dtype(scalar_t)
-            return np.dtype(np.float64)
-
-        if ann is np.ndarray:
-            return np.dtype(np.float64)
+        if (dt := Types.resolve_dtype(ann)) is not None:
+            return dt
 
         raise TypeError(
-            f"{cls.__name__}.{field_name} must be annotated as a 1D NumPy array or BatchedContainer, got {annotation!r}"
+            f"{cls.__name__}.{field_name} must be annotated as a 1D NumPy array or Batch, got {annotation!r}"
         )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -223,9 +136,9 @@ class BatchedContainer[T: ScalarView = ScalarView]:
         # Extract scalar view type parameter T from generic bases if concrete
         for base in getattr(cls, "__orig_bases__", ()):
             origin = get_origin(base)
-            if origin is not None and isinstance(origin, type) and issubclass(origin, BatchedContainer):
+            if origin is not None and isinstance(origin, type) and issubclass(origin, Batch):
                 args = get_args(base)
-                if args and isinstance(args[0], type) and issubclass(args[0], ScalarView):
+                if args and isinstance(args[0], type) and issubclass(args[0], View):
                     cls._scalar_type = args[0]
                     break
 
@@ -233,9 +146,9 @@ class BatchedContainer[T: ScalarView = ScalarView]:
             return
 
         base_dtypes: dict[str, np.dtype[Any]] = {}
-        base_nested: dict[str, type[BatchedContainer[Any]]] = {}
+        base_nested: dict[str, type[Batch[Any]]] = {}
         for mro_cls in reversed(cls.__mro__[1:]):
-            if issubclass(mro_cls, BatchedContainer):
+            if issubclass(mro_cls, Batch):
                 if "_field_dtypes" in mro_cls.__dict__:
                     base_dtypes.update(mro_cls._field_dtypes)
                 if "_nested_fields" in mro_cls.__dict__:
@@ -247,7 +160,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
             hints = annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF)
 
         dtypes: dict[str, np.dtype[Any]] = {}
-        nested: dict[str, type[BatchedContainer[Any]]] = {}
+        nested: dict[str, type[Batch[Any]]] = {}
         all_fields: list[str] = []
         for f in fields(cls):
             if not f.init:
@@ -297,7 +210,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
             cls._scalar_source_fields = cls._all_fields
             cls._scalar_converters = ()
 
-        cls.__eq__ = BatchedContainer._container_eq  # type: ignore[method-assign]
+        cls.__eq__ = Batch._container_eq  # type: ignore[method-assign]
 
     def _container_eq(self, other: object) -> bool:
         r"""Compare two containers for exact array and nested-container equality across all registered SoA fields."""
@@ -371,7 +284,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
         for i in range(len(self)):
             yield self._get_scalar(i)
 
-    def _normalize_indices(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Int32Array:
+    def _normalize_indices(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Types.Int32Array:
         r"""Normalize a slice, boolean mask, or integer index sequence into a 1D `int32` index array.
 
         Args:
@@ -379,7 +292,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
             n: Total number of records in the target container.
 
         Returns:
-            Int32Array: Resolved 0-based `int32` indices.
+            Types.Int32Array: Resolved 0-based `int32` indices.
         """
         n = len(self)
         if isinstance(item, slice):
@@ -396,7 +309,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
             indices = np.where(indices < 0, indices + n, indices)
         return indices
 
-    def filter(self, mask: BoolArray | list[bool]) -> Self:
+    def filter(self, mask: Types.BoolArray | list[bool]) -> Self:
         r"""Return a filtered container containing only records where `mask` is True."""
         return self._get_slice(mask)
 
@@ -430,7 +343,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
         self,
         *by: str,
         descending: bool | Sequence[bool] = False,
-    ) -> Int32Array:
+    ) -> Types.Int32Array:
         r"""Compute the stable 0-based `int32` permutation indices that sort this container by `*by`.
 
         Supports sorting by one or more registered 1D array columns or computed 1D array properties
@@ -528,7 +441,7 @@ class BatchedContainer[T: ScalarView = ScalarView]:
         return cls(**kwargs)
 
 
-class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
+class RaggedBatch[T: View = View](Batch[T]):
     r"""Concrete generic base class for ragged Structure-of-Arrays (SoA) containers.
 
     Ragged containers store variable-length per-record arrays (declared in `_ragged_fields`)
@@ -541,11 +454,14 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
     """
 
     __slots__ = ()
-    offsets: Int32Array
-    lengths: Int32Array
+    offsets: Types.Int32Array
+    lengths: Types.Int32Array
     _ragged_fields: ClassVar[tuple[str, ...]] = ()
     _ragged_fields_set: ClassVar[frozenset[str]] = frozenset()
+    _ragged_array_fields: ClassVar[tuple[str, ...]] = ()
+    _ragged_nested_fields: ClassVar[dict[str, type[Batch[Any]]]] = {}
     _record_fields: ClassVar[tuple[str, ...]] = ()
+    _record_nested_fields: ClassVar[dict[str, type[Batch[Any]]]] = {}
     _data_fields: ClassVar[tuple[str, ...]] = ()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -555,16 +471,43 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
         ragged_set = frozenset(cls._ragged_fields)
         cls._ragged_fields_set = ragged_set
         cls._data_fields = tuple(f for f in cls._all_fields if f not in ("offsets", "lengths"))
+        cls._ragged_array_fields = tuple(f for f in cls._ragged_fields if f in cls._field_dtypes)
+        cls._ragged_nested_fields = {f: c for f, c in cls._nested_fields.items() if f in ragged_set}
         cls._record_fields = tuple(
             f for f in cls._field_dtypes if f not in ("offsets", "lengths") and f not in ragged_set
         )
+        cls._record_nested_fields = {f: c for f, c in cls._nested_fields.items() if f not in ragged_set}
+
+        scalar_cls = cls._scalar_type
+        if scalar_cls is not None and "__dataclass_fields__" in scalar_cls.__dict__:
+            s_fields = fields(scalar_cls)
+            s_hints: dict[str, Any] = {}
+            for s_mro in reversed(scalar_cls.__mro__):
+                if "__dataclass_fields__" in s_mro.__dict__:
+                    try:
+                        s_hints.update(annotationlib.get_annotations(s_mro, format=annotationlib.Format.VALUE))
+                    except Exception:
+                        pass
+            convs: list[Callable[[Any], Any] | None] = []
+            has_conv = False
+            for df, sf in zip(cls._data_fields, s_fields, strict=False):
+                sf_ann = s_hints.get(sf.name, sf.type)
+                if isinstance(sf_ann, type) and issubclass(sf_ann, Enum):
+                    convs.append(sf_ann)
+                    has_conv = True
+                elif sf_ann is bytes and df in ragged_set and df in cls._field_dtypes:
+                    convs.append(np.ndarray.tobytes)
+                    has_conv = True
+                else:
+                    convs.append(None)
+            cls._scalar_converters = tuple(convs) if has_conv else ()
 
     def __len__(self) -> int:
         r"""Return the number of records in the ragged container."""
         return len(self.offsets)
 
     @property
-    def indptr(self) -> Int32Array:
+    def indptr(self) -> Types.Int32Array:
         r"""CSR-compatible $(N + 1)$-length index pointer array (`[0, *cumsum(lengths)]`)."""
         n = len(self.offsets)
         if n == 0:
@@ -576,8 +519,8 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
 
     @staticmethod
     def lengths_to_offsets(
-        lengths: Int32Array,
-    ) -> Int32Array:
+        lengths: Types.Int32Array,
+    ) -> Types.Int32Array:
         r"""Compute 0-based exclusive prefix-sum offsets from a 1D array of element lengths.
 
         Args:
@@ -605,7 +548,7 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
         if convs:
             return scalar_cls(
                 *(
-                    getattr(self, f)[off:end]
+                    (conv(getattr(self, f)[off:end]) if conv is not None else getattr(self, f)[off:end])
                     if f in ragged
                     else (
                         getattr(self, f)[idx]
@@ -625,17 +568,33 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
         )
 
     def _get_slice(self, item: slice | np.ndarray[Any, Any] | list[Any]) -> Self:
-        r"""Slice both per-record arrays and variable-length ragged arrays in parallel."""
-        ragged_arrays = tuple(getattr(self, f) for f in self._ragged_fields)
+        r"""Slice both per-record arrays and variable-length ragged arrays/containers in parallel."""
+        ragged_arrays = tuple(getattr(self, f) for f in self._ragged_array_fields)
         indices, new_offsets, new_lengths, sliced_ragged = self._slice_ragged(item, *ragged_arrays)
         if len(indices) == 0:
             return self.empty()
         kwargs: dict[str, Any] = {"offsets": new_offsets, "lengths": new_lengths}
-        for f, arr in zip(self._ragged_fields, sliced_ragged, strict=True):
+        for f, arr in zip(self._ragged_array_fields, sliced_ragged, strict=True):
             kwargs[f] = arr
+        if self._ragged_nested_fields:
+            if isinstance(item, slice) and item.step in (None, 1):
+                start, stop, _ = item.indices(len(self))
+                base_offset = int(self.offsets[start])
+                end_offset = int(self.offsets[stop - 1]) + int(self.lengths[stop - 1])
+                for f in self._ragged_nested_fields:
+                    kwargs[f] = getattr(self, f)[base_offset:end_offset]
+            else:
+                total_len = int(new_offsets[-1] + new_lengths[-1])
+                if total_len == 0:
+                    for f, child_cls in self._ragged_nested_fields.items():
+                        kwargs[f] = child_cls.empty()
+                else:
+                    flat_idx = _expand_ragged_indices_kernel(self.offsets, new_offsets, new_lengths, indices, total_len)
+                    for f in self._ragged_nested_fields:
+                        kwargs[f] = getattr(self, f)[flat_idx]
         for f in self._record_fields:
             kwargs[f] = getattr(self, f)[indices]
-        for f in self._nested_fields:
+        for f in self._record_nested_fields:
             kwargs[f] = getattr(self, f)[indices]
         return type(self)(**kwargs)
 
@@ -652,18 +611,20 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
             "offsets": cls.lengths_to_offsets(all_lengths),
             "lengths": all_lengths,
         }
-        for f in cls._ragged_fields:
+        for f in cls._ragged_array_fields:
             parts = [getattr(b, f) for b in batches_list if len(getattr(b, f)) > 0]
             kwargs[f] = np.concatenate(parts) if parts else np.empty(0, dtype=cls._field_dtypes[f])
+        for f, child_cls in cls._ragged_nested_fields.items():
+            kwargs[f] = child_cls.concat([getattr(b, f) for b in batches_list])
         for f in cls._record_fields:
             kwargs[f] = np.concatenate([getattr(b, f) for b in batches_list])
-        for f, child_cls in cls._nested_fields.items():
+        for f, child_cls in cls._record_nested_fields.items():
             kwargs[f] = child_cls.concat([getattr(b, f) for b in batches_list])
         return cls(**kwargs)
 
     @classmethod
     def from_list(cls, items: Sequence[T]) -> Self:
-        r"""Pack a sequence of [`ScalarView`][seroverse.core.collections.ScalarView] instances into a ragged container."""
+        r"""Pack a sequence of [`View`][seroverse.core.collections.View] instances into a ragged container."""
         if not items:
             return cls.empty()
         scalar_cls = cls._scalar_type or type(items[0])
@@ -676,7 +637,7 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
             "offsets": cls.lengths_to_offsets(lengths),
             "lengths": lengths,
         }
-        for b_f in cls._ragged_fields:
+        for b_f in cls._ragged_array_fields:
             s_f = field_map[b_f]
             dt = cls._field_dtypes[b_f]
             parts = [
@@ -685,11 +646,19 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
                 if len(getattr(it, s_f)) > 0
             ]
             kwargs[b_f] = np.concatenate(parts) if (has_elems and parts) else np.empty(0, dtype=dt)
+        for b_f, child_cls in cls._ragged_nested_fields.items():
+            s_f = field_map[b_f]
+            parts_b = [
+                v if isinstance((v := getattr(it, s_f)), child_cls) else child_cls.from_list(v)
+                for it in items
+                if len(getattr(it, s_f)) > 0
+            ]
+            kwargs[b_f] = child_cls.concat(parts_b) if (has_elems and parts_b) else child_cls.empty()
         for b_f in cls._record_fields:
             s_f = field_map[b_f]
             dt = cls._field_dtypes[b_f]
             kwargs[b_f] = np.array([getattr(it, s_f) for it in items], dtype=dt)
-        for b_f, child_cls in cls._nested_fields.items():
+        for b_f, child_cls in cls._record_nested_fields.items():
             s_f = field_map[b_f]
             kwargs[b_f] = child_cls.from_list([getattr(it, s_f) for it in items])
         return cls(**kwargs)
@@ -699,9 +668,9 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
         item: slice | np.ndarray[Any, Any] | list[Any],
         *arrays: np.ndarray[tuple[int], Any],
     ) -> tuple[
-        Int32Array,
-        Int32Array,
-        Int32Array,
+        Types.Int32Array,
+        Types.Int32Array,
+        Types.Int32Array,
         tuple[np.ndarray[tuple[int], Any], ...],
     ]:
         r"""Slice or gather one or more parallel ragged data arrays while maintaining contiguous packing.
@@ -761,10 +730,16 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
                 tuple(np.empty(0, dtype=a.dtype) for a in arrays),
             )
 
-        sliced = tuple(
-            _gather_ragged_kernel(a, self.offsets, new_offsets, new_lengths, indices, total_len) for a in arrays
-        )
-        return indices, new_offsets, new_lengths, sliced
+        flat_idx: Types.Int32Array | None = None
+        sliced_list: list[np.ndarray[tuple[int], Any]] = []
+        for a in arrays:
+            if a.dtype.kind in ("S", "U", "O"):
+                if flat_idx is None:
+                    flat_idx = _expand_ragged_indices_kernel(self.offsets, new_offsets, new_lengths, indices, total_len)
+                sliced_list.append(a[flat_idx])
+            else:
+                sliced_list.append(_gather_ragged_kernel(a, self.offsets, new_offsets, new_lengths, indices, total_len))
+        return indices, new_offsets, new_lengths, tuple(sliced_list)
 
     def pad(
         self,
@@ -804,6 +779,11 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
             target_field = field_name
 
         data = getattr(self, target_field)
+        if not isinstance(data, np.ndarray):
+            raise TypeError(
+                f"Cannot pad nested container field {target_field!r} of type {type(data).__name__}; "
+                "pad() requires a 1D NumPy array field"
+            )
         n = len(self)
         target_len = (int(np.max(self.lengths)) if n > 0 else 0) if max_len is None else int(max_len)
         if target_len < 0:
@@ -823,7 +803,7 @@ class RaggedArrayContainer[T: ScalarView = ScalarView](BatchedContainer[T]):
 
 
 @dataclass(frozen=True, slots=True)
-class Spec(ScalarView):
+class Spec(View):
     r"""Immutable scalar specification for an ontology or reference database record.
 
     Serves as the scalar element view `T` for [`SpecContainer`][seroverse.core.collections.SpecContainer]
@@ -846,7 +826,7 @@ class Spec(ScalarView):
 
 
 @dataclass(frozen=True, slots=True)
-class SpecContainer[T: Spec = Spec](BatchedContainer[T]):
+class Specs[T: Spec = Spec](Batch[T]):
     r"""Immutable, read-only Structure-of-Arrays (SoA) database container for [`Spec`][seroverse.core.collections.Spec] records.
 
     Extends [`BatchedContainer`][seroverse.core.collections.BatchedContainer] with:
@@ -858,7 +838,7 @@ class SpecContainer[T: Spec = Spec](BatchedContainer[T]):
       and `container[key]` (`str | bytes` indexing).
     """
 
-    names: BytesArray
+    names: Types.BytesArray
     _lookup_cache: dict[bytes, int] | None = field(default=None, init=False, repr=False, compare=False, hash=False)
     _scalar_type: ClassVar[type[Any] | None] = Spec
 
@@ -952,7 +932,7 @@ class SpecContainer[T: Spec = Spec](BatchedContainer[T]):
         return self._get_slice(item)
 
 
-_ENUM_SPECS_CACHE: dict[type[Any], SpecContainer[Any]] = {}
+_ENUM_SPECS_CACHE: dict[type[Any], Specs[Any]] = {}
 _ENUM_LOOKUP_CACHE: dict[type[Any], dict[bytes, Any]] = {}
 
 
@@ -977,12 +957,12 @@ class SpecEnum(IntEnum):
     """
 
     @classmethod
-    def _compile_specs(cls) -> SpecContainer[Any]:
+    def _compile_specs(cls) -> Specs[Any]:
         r"""Compile the singleton [`SpecContainer`][seroverse.core.collections.SpecContainer] for this enum class."""
-        return SpecContainer.from_list([Spec(name=m.name.lower().encode("ascii")) for m in cls])
+        return Specs.from_list([Spec(name=m.name.lower().encode("ascii")) for m in cls])
 
     @classmethod
-    def specs(cls) -> SpecContainer[Any]:
+    def specs(cls) -> Specs[Any]:
         r"""Return the cached, validated singleton [`SpecContainer`][seroverse.core.collections.SpecContainer] for this enum."""
         cached = _ENUM_SPECS_CACHE.get(cls)
         if cached is not None:
@@ -1092,16 +1072,38 @@ class SpecEnum(IntEnum):
 
 
 # Kernels --------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True, parallel=True)
-def _gather_ragged_kernel(
-    data: np.ndarray[tuple[int], Any],
-    offsets: Int32Array,
-    new_offsets: Int32Array,
-    new_lengths: Int32Array,
-    indices: Int32Array,
+@Types.njit(parallel=True)
+def _expand_ragged_indices_kernel(
+    offsets: Types.Int32Array,
+    new_offsets: Types.Int32Array,
+    new_lengths: Types.Int32Array,
+    indices: Types.Int32Array,
     total_len: int,
-) -> np.ndarray[tuple[int], Any]:
-    r"""Parallel Numba kernel to gather and compact ragged slices for any 1D NumPy dtype."""
+) -> Types.Int32Array:
+    r"""Expand selected record indices and their `(offset, length)` spans into flat element indices."""
+    out = np.empty(total_len, dtype=np.int32)
+    n = len(indices)
+    for i in prange(n):
+        length_val = new_lengths[i]
+        if length_val == 0:
+            continue
+        src_off = offsets[indices[i]]
+        dst_off = new_offsets[i]
+        for c in range(length_val):
+            out[dst_off + c] = src_off + c
+    return out
+
+
+@Types.njit(parallel=True)
+def _gather_ragged_kernel[T: np.generic](
+    data: np.ndarray[tuple[int], np.dtype[T]],
+    offsets: Types.Int32Array,
+    new_offsets: Types.Int32Array,
+    new_lengths: Types.Int32Array,
+    indices: Types.Int32Array,
+    total_len: int,
+) -> np.ndarray[tuple[int], np.dtype[T]]:
+    r"""Parallel Numba kernel to gather and compact ragged slices for any 1D numeric/boolean NumPy dtype."""
     out = np.empty(total_len, dtype=data.dtype)
     n = len(indices)
     for i in prange(n):
@@ -1115,14 +1117,14 @@ def _gather_ragged_kernel(
     return out
 
 
-@njit(cache=True, nogil=True, parallel=True)
-def _pad_ragged_kernel(
-    data: np.ndarray[tuple[int], Any],
-    offsets: Int32Array,
-    lengths: Int32Array,
+@Types.njit(parallel=True)
+def _pad_ragged_kernel[T: np.generic](
+    data: np.ndarray[tuple[int], np.dtype[T]],
+    offsets: Types.Int32Array,
+    lengths: Types.Int32Array,
     max_len: int,
-    fill_value: Any,
-) -> np.ndarray[tuple[int, int], Any]:
+    fill_value: T,
+) -> np.ndarray[tuple[int, int], np.dtype[T]]:
     r"""Parallel Numba kernel to pack a ragged 1D buffer into a dense 2D `(N, max_len)` array."""
     n = len(lengths)
     out = np.full((n, max_len), fill_value, dtype=data.dtype)

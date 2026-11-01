@@ -10,28 +10,29 @@ from pathlib import Path
 from typing import Any, Self
 
 import numpy as np
-from numba import njit, prange
+from numba import prange
 
 from seroverse.core.graph.csr import RelationalCSR
 from seroverse.core.graph.models import Graph, Graphs
+from seroverse.core.types import Types
 
 
 # ----------------------------------------------------------------------------------------------------------------------
 # Private Compiled Numba Kernels: R-MPNN Forward, Backward, Bilinear Edge Scorer, AdamW
 # ----------------------------------------------------------------------------------------------------------------------
-@njit(cache=True, nogil=True, parallel=True, fastmath=True)
+@Types.njit(parallel=True, fastmath=True)
 def _mpnn_layer_forward(
-    h_in: np.ndarray,  # (N, D)
-    indptr: np.ndarray,  # (N + 1,)
-    src_indices: np.ndarray,  # (E,)
-    rel_types: np.ndarray,  # (E,)
-    edge_weights: np.ndarray,  # (E,)
-    w_rel: np.ndarray,  # (R, D, D)
-    b_rel: np.ndarray,  # (D,)
-    clamped_mask: np.ndarray,  # (N,) uint8
-    clamped_anchor: np.ndarray,  # (N, D)
+    h_in: Types.Float32Array2D,  # (N, D)
+    indptr: Types.Int32Array,  # (N + 1,)
+    src_indices: Types.Int32Array,  # (E,)
+    rel_types: Types.Int32Array,  # (E,)
+    edge_weights: Types.Float32Array,  # (E,)
+    w_rel: Types.Float32Array3D,  # (R, D, D)
+    b_rel: Types.Float32Array,  # (D,)
+    clamped_mask: Types.UInt8Array,  # (N,) uint8
+    clamped_anchor: Types.Float32Array2D,  # (N, D)
     norm_eps: float = 1e-5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[Types.Float32Array2D, Types.Float32Array2D, Types.Float32Array]:
     r"""Parallel relational message-passing forward kernel with per-relation aggregation, ReLU, and RMSNorm."""
     n_nodes, dim = h_in.shape
     n_rel = w_rel.shape[0]
@@ -41,7 +42,7 @@ def _mpnn_layer_forward(
     eps = np.float32(norm_eps)
     inv_d = np.float32(1.0 / max(dim, 1))
 
-    for v in prange(n_nodes):
+    for v in prange(n_nodes):  # type: ignore[not-iterable]
         msg = np.empty(dim, dtype=np.float32)
         for d in range(dim):
             msg[d] = b_rel[d]
@@ -85,19 +86,19 @@ def _mpnn_layer_forward(
     return h_out, pre_norm, rms_inv
 
 
-@njit(cache=True, nogil=True, fastmath=True)
+@Types.njit(fastmath=True)
 def _mpnn_layer_backward(
-    d_h_out: np.ndarray,  # (N, D)
-    h_in: np.ndarray,  # (N, D)
-    pre_norm: np.ndarray,  # (N, D)
-    rms_inv: np.ndarray,  # (N,)
-    indptr: np.ndarray,  # (N + 1,)
-    src_indices: np.ndarray,  # (E,)
-    rel_types: np.ndarray,  # (E,)
-    edge_weights: np.ndarray,  # (E,)
-    w_rel: np.ndarray,  # (R, D, D)
-    clamped_mask: np.ndarray,  # (N,) uint8
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    d_h_out: Types.Float32Array2D,  # (N, D)
+    h_in: Types.Float32Array2D,  # (N, D)
+    pre_norm: Types.Float32Array2D,  # (N, D)
+    rms_inv: Types.Float32Array,  # (N,)
+    indptr: Types.Int32Array,  # (N + 1,)
+    src_indices: Types.Int32Array,  # (E,)
+    rel_types: Types.Int32Array,  # (E,)
+    edge_weights: Types.Float32Array,  # (E,)
+    w_rel: Types.Float32Array3D,  # (R, D, D)
+    clamped_mask: Types.UInt8Array,  # (N,) uint8
+) -> tuple[Types.Float32Array2D, Types.Float32Array3D, Types.Float32Array]:
     r"""Backward pass through RMSNorm, clamped residual anchor, ReLU, and per-relation CSR aggregation."""
     n_nodes, dim = h_in.shape
     n_rel = w_rel.shape[0]
@@ -178,20 +179,20 @@ def _mpnn_layer_backward(
     return d_h_in, d_w_rel, d_b_rel
 
 
-@njit(cache=True, nogil=True, parallel=True, fastmath=True)
+@Types.njit(parallel=True, fastmath=True)
 def _bilinear_edge_scores_forward(
-    u_proj: np.ndarray,  # (M, K)
-    v_proj: np.ndarray,  # (M, K)
-    w_chan: np.ndarray,  # (C, K)
-    b_chan: np.ndarray,  # (C,)
-) -> np.ndarray:
+    u_proj: Types.Float32Array2D,  # (M, K)
+    v_proj: Types.Float32Array2D,  # (M, K)
+    w_chan: Types.Float32Array2D,  # (C, K)
+    b_chan: Types.Float32Array,  # (C,)
+) -> Types.Float32Array3D:
     r"""Compute factorized bilinear multi-channel edge logits `S[u, v, c] = sum_k u_proj[u, k] v_proj[v, k] W_chan[c, k] / sqrt(K) + b_c`."""
     m_nodes = u_proj.shape[0]
     n_chan, rank_k = w_chan.shape
     scores = np.empty((m_nodes, m_nodes, n_chan), dtype=np.float32)
     inv_sqrt_k = np.float32(1.0 / np.sqrt(float(max(rank_k, 1))))
 
-    for u in prange(m_nodes):
+    for u in prange(m_nodes):  # type: ignore[not-iterable]
         for v in range(m_nodes):
             if u == v:
                 for c in range(n_chan):
@@ -206,13 +207,13 @@ def _bilinear_edge_scores_forward(
     return scores
 
 
-@njit(cache=True, nogil=True, fastmath=True)
+@Types.njit(fastmath=True)
 def _bilinear_edge_scores_backward(
-    d_scores: np.ndarray,  # (M, M, C)
-    u_proj: np.ndarray,  # (M, K)
-    v_proj: np.ndarray,  # (M, K)
-    w_chan: np.ndarray,  # (C, K)
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    d_scores: Types.Float32Array3D,  # (M, M, C)
+    u_proj: Types.Float32Array2D,  # (M, K)
+    v_proj: Types.Float32Array2D,  # (M, K)
+    w_chan: Types.Float32Array2D,  # (C, K)
+) -> tuple[Types.Float32Array2D, Types.Float32Array2D, Types.Float32Array2D, Types.Float32Array]:
     r"""Backward pass for factorized bilinear multi-channel tensor contraction."""
     m_nodes = u_proj.shape[0]
     n_chan, rank_k = w_chan.shape
@@ -243,12 +244,12 @@ def _bilinear_edge_scores_backward(
     return d_u_proj, d_v_proj, d_w_chan, d_b_chan
 
 
-@njit(cache=True, nogil=True, fastmath=True)
+@Types.njit(fastmath=True)
 def _adamw_step(
-    param: np.ndarray,
-    grad: np.ndarray,
-    m: np.ndarray,
-    v: np.ndarray,
+    param: Types.Float32Array,
+    grad: Types.Float32Array,
+    m: Types.Float32Array,
+    v: Types.Float32Array,
     step_size: float,
     wd_factor: float,
     apply_wd: bool,
@@ -259,18 +260,14 @@ def _adamw_step(
     eps = np.float32(1e-8)
     ss = np.float32(step_size)
     wf = np.float32(wd_factor)
-    p_flat = param.ravel()
-    g_flat = grad.ravel()
-    m_flat = m.ravel()
-    v_flat = v.ravel()
-    for i in range(len(p_flat)):
-        g = g_flat[i]
-        m_flat[i] = beta1 * m_flat[i] + (np.float32(1.0) - beta1) * g
-        v_flat[i] = beta2 * v_flat[i] + (np.float32(1.0) - beta2) * g * g
+    for i in range(len(param)):
+        g = grad[i]
+        m[i] = beta1 * m[i] + (np.float32(1.0) - beta1) * g
+        v[i] = beta2 * v[i] + (np.float32(1.0) - beta2) * g * g
         if apply_wd:
-            p_flat[i] = p_flat[i] * wf - ss * m_flat[i] / (np.sqrt(v_flat[i]) + eps)
+            param[i] = param[i] * wf - ss * m[i] / (np.sqrt(v[i]) + eps)
         else:
-            p_flat[i] -= ss * m_flat[i] / (np.sqrt(v_flat[i]) + eps)
+            param[i] -= ss * m[i] / (np.sqrt(v[i]) + eps)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -675,20 +672,88 @@ class RelationalMPNN:
         step_size = float(lr_t * np.sqrt(bc2) / bc1)
         wd_factor = float(1.0 - lr_t * self.weight_decay)
 
-        _adamw_step(self.w_in_, d_w_in, self._m_w_in, self._v_w_in, step_size, wd_factor, True)
-        _adamw_step(self.b_in_, d_b_in, self._m_b_in, self._v_b_in, step_size, wd_factor, False)
-        _adamw_step(self.w_rel_, d_w_rel_all, self._m_w_rel, self._v_w_rel, step_size, wd_factor, True)
-        _adamw_step(self.b_rel_, d_b_rel_all, self._m_b_rel, self._v_b_rel, step_size, wd_factor, False)
+        _adamw_step(
+            self.w_in_.ravel(), d_w_in.ravel(), self._m_w_in.ravel(), self._v_w_in.ravel(), step_size, wd_factor, True
+        )
+        _adamw_step(
+            self.b_in_.ravel(), d_b_in.ravel(), self._m_b_in.ravel(), self._v_b_in.ravel(), step_size, wd_factor, False
+        )
+        _adamw_step(
+            self.w_rel_.ravel(),
+            d_w_rel_all.ravel(),
+            self._m_w_rel.ravel(),
+            self._v_w_rel.ravel(),
+            step_size,
+            wd_factor,
+            True,
+        )
+        _adamw_step(
+            self.b_rel_.ravel(),
+            d_b_rel_all.ravel(),
+            self._m_b_rel.ravel(),
+            self._v_b_rel.ravel(),
+            step_size,
+            wd_factor,
+            False,
+        )
 
         if node_targets is not None:
-            _adamw_step(self.w_node_, d_w_node, self._m_w_node, self._v_w_node, step_size, wd_factor, True)
-            _adamw_step(self.b_node_, d_b_node, self._m_b_node, self._v_b_node, step_size, wd_factor, False)
+            _adamw_step(
+                self.w_node_.ravel(),
+                d_w_node.ravel(),
+                self._m_w_node.ravel(),
+                self._v_w_node.ravel(),
+                step_size,
+                wd_factor,
+                True,
+            )
+            _adamw_step(
+                self.b_node_.ravel(),
+                d_b_node.ravel(),
+                self._m_b_node.ravel(),
+                self._v_b_node.ravel(),
+                step_size,
+                wd_factor,
+                False,
+            )
 
         if edge_parent_targets is not None:
-            _adamw_step(self.w_edge_src_, d_w_esrc, self._m_w_esrc, self._v_w_esrc, step_size, wd_factor, True)
-            _adamw_step(self.w_edge_dst_, d_w_edst, self._m_w_edst, self._v_w_edst, step_size, wd_factor, True)
-            _adamw_step(self.w_edge_chan_, d_w_echan, self._m_w_echan, self._v_w_echan, step_size, wd_factor, True)
-            _adamw_step(self.b_edge_chan_, d_b_echan, self._m_b_echan, self._v_b_echan, step_size, wd_factor, False)
+            _adamw_step(
+                self.w_edge_src_.ravel(),
+                d_w_esrc.ravel(),
+                self._m_w_esrc.ravel(),
+                self._v_w_esrc.ravel(),
+                step_size,
+                wd_factor,
+                True,
+            )
+            _adamw_step(
+                self.w_edge_dst_.ravel(),
+                d_w_edst.ravel(),
+                self._m_w_edst.ravel(),
+                self._v_w_edst.ravel(),
+                step_size,
+                wd_factor,
+                True,
+            )
+            _adamw_step(
+                self.w_edge_chan_.ravel(),
+                d_w_echan.ravel(),
+                self._m_w_echan.ravel(),
+                self._v_w_echan.ravel(),
+                step_size,
+                wd_factor,
+                True,
+            )
+            _adamw_step(
+                self.b_edge_chan_.ravel(),
+                d_b_echan.ravel(),
+                self._m_b_echan.ravel(),
+                self._v_b_echan.ravel(),
+                step_size,
+                wd_factor,
+                False,
+            )
 
         self.loss_history_.append(total_loss)
         return total_loss

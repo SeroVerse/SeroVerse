@@ -12,19 +12,19 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, Self
 
 import numpy as np
-from numba import njit
 
 from seroverse.core.align.pairwise import PairwiseAligner
 from seroverse.core.align.score import SubstitutionMatrix, _ungapped_pair_prefilter
-from seroverse.core.collections import Float32Array, Float64Array, Int32Array, RaggedArrayContainer, ScalarView
+from seroverse.core.collections import RaggedBatch, View
 from seroverse.core.graph.csr import CSR
 from seroverse.core.seq.kmers import RandstrobeIndex
-from seroverse.core.seq.seq import Sequences
+from seroverse.core.seq.seq import SeqRecords
+from seroverse.core.types import Types
 
 
 # Containers -----------------------------------------------------------------------------------------------------------
 @dataclass(slots=True, frozen=True)
-class Cluster(ScalarView):
+class Cluster(View):
     r"""Scalar view of a single sequence cluster.
 
     Attributes:
@@ -33,7 +33,7 @@ class Cluster(ScalarView):
     """
 
     representative: int
-    members: Int32Array
+    members: Types.Int32Array
 
     def __len__(self) -> int:
         r"""Return the number of member sequences in this cluster."""
@@ -41,7 +41,7 @@ class Cluster(ScalarView):
 
 
 @dataclass(slots=True, frozen=True)
-class Clusters(RaggedArrayContainer[Cluster]):
+class Clusters(RaggedBatch[Cluster]):
     r"""Ragged Structure-of-Arrays (SoA) container for sequence clustering results.
 
     Stores centroid representative indices (`representatives`) and variable-length
@@ -57,10 +57,10 @@ class Clusters(RaggedArrayContainer[Cluster]):
 
     _ragged_fields: ClassVar[tuple[str, ...]] = ("members",)
 
-    representatives: Int32Array
-    members: Int32Array
-    offsets: Int32Array
-    lengths: Int32Array
+    representatives: Types.Int32Array
+    members: Types.Int32Array
+    offsets: Types.Int32Array
+    lengths: Types.Int32Array
 
     @property
     def n_clusters(self) -> int:
@@ -73,7 +73,7 @@ class Clusters(RaggedArrayContainer[Cluster]):
         return len(self.members)
 
     @property
-    def cluster_ids(self) -> Int32Array:
+    def cluster_ids(self) -> Types.Int32Array:
         r"""1D array mapping each sequence index to its cluster ID $c \in [0, C-1]$."""
         if len(self.members) == 0:
             return np.empty(0, dtype=np.int32)
@@ -101,7 +101,7 @@ class Clusters(RaggedArrayContainer[Cluster]):
         data = np.ones(len(self.members), dtype=np.uint8)
         return CSR(indptr=self.indptr, indices=self.members, data=data, shape=(c, cols))
 
-    def get_members(self, cluster_id: int) -> Int32Array:
+    def get_members(self, cluster_id: int) -> Types.Int32Array:
         r"""Return 1D array of original sequence indices assigned to the specified cluster ID.
 
         Args:
@@ -112,14 +112,14 @@ class Clusters(RaggedArrayContainer[Cluster]):
         """
         return self[cluster_id].members
 
-    def centroids(self, seqs: Sequences) -> Sequences:
+    def centroids(self, seqs: SeqRecords) -> SeqRecords:
         r"""Extract the representative centroid sequences from the source collection.
 
         Args:
             seqs: Source [`Sequences`][seroverse.core.seq.seq.Sequences] collection.
 
         Returns:
-            Sequences: Sliced collection containing only cluster centroids.
+            SeqRecords: Sliced collection containing only cluster centroids.
         """
         if len(seqs) != self.n_seqs:
             raise ValueError(f"Sequence length mismatch: expected {self.n_seqs}, got {len(seqs)}")
@@ -128,9 +128,9 @@ class Clusters(RaggedArrayContainer[Cluster]):
     @classmethod
     def from_assignments(
         cls,
-        cluster_ids: Int32Array,
-        representatives: Int32Array,
-        sizes: Int32Array,
+        cluster_ids: Types.Int32Array,
+        representatives: Types.Int32Array,
+        sizes: Types.Int32Array,
     ) -> Self:
         r"""Construct a [`Clusters`][seroverse.core.seq.clustering.Clusters] container from flat cluster ID assignments.
 
@@ -215,7 +215,7 @@ class Clusterer:
 
     def cluster(
         self,
-        seqs: Sequences,
+        seqs: SeqRecords,
         roles: np.ndarray[tuple[int], np.dtype[Any]] | Sequence[int] | None = None,
         embeddings: np.ndarray[tuple[int, int], np.dtype[Any]] | None = None,
     ) -> Clusters:
@@ -248,7 +248,7 @@ class Clusterer:
                 lengths=np.ones(1, dtype=np.int32),
             )
 
-        roles_arr: Int32Array | None = None
+        roles_arr: Types.Int32Array | None = None
         if roles is not None:
             roles_arr = np.asarray(roles, dtype=np.int32)
             if len(roles_arr) != n:
@@ -284,12 +284,12 @@ class Clusterer:
         upper_mask = seeds.query_indices < seeds.target_indices
         candidate_seeds = seeds.filter(upper_mask) if len(seeds) > 0 else seeds
 
-        q_chunks: list[Int32Array] = []
-        t_chunks: list[Int32Array] = []
-        pident_chunks: list[Float32Array] = []
-        bitscore_chunks: list[Float32Array] = []
-        q_cov_chunks: list[Float64Array] = []
-        t_cov_chunks: list[Float64Array] = []
+        q_chunks: list[Types.Int32Array] = []
+        t_chunks: list[Types.Int32Array] = []
+        pident_chunks: list[Types.Float32Array] = []
+        bitscore_chunks: list[Types.Float32Array] = []
+        q_cov_chunks: list[Types.Float64Array] = []
+        t_cov_chunks: list[Types.Float64Array] = []
 
         seeded_pairs: set[int] = set()
         if len(candidate_seeds) > 0:
@@ -330,8 +330,8 @@ class Clusterer:
         # 1b. MMseqs2-Style Reduced-Alphabet + Ungapped BLOSUM62 Diagonal Prefilter & Unbanded SW for Divergent Homologs
         if sensitive_mode:
             min_cov_eff = max(float(self.min_coverage), 0.0)
-            extra_q_parts: list[Int32Array] = []
-            extra_t_parts: list[Int32Array] = []
+            extra_q_parts: list[Types.Int32Array] = []
+            extra_t_parts: list[Types.Int32Array] = []
 
             if roles_arr is not None:
                 small_q_list: list[int] = []
@@ -561,11 +561,11 @@ class Clusterer:
 
 
 # Kernels & Algorithms -------------------------------------------------------------------------------------------------
-@njit(nogil=True, cache=True)
+@Types.njit
 def _pack_members(
-    cluster_ids: np.ndarray,
-    offsets: np.ndarray,
-) -> np.ndarray:
+    cluster_ids: Types.Int32Array,
+    offsets: Types.Int32Array,
+) -> Types.Int32Array:
     r"""Scatter sequence indices `[0..N-1]` into a flat CSR-style `members` array in $O(N)$ time."""
     n_seqs = len(cluster_ids)
     members = np.empty(n_seqs, dtype=np.int32)
@@ -577,12 +577,12 @@ def _pack_members(
     return members
 
 
-@njit(nogil=True, cache=True)
+@Types.njit
 def _build_undirected_adj(
     n_seqs: int,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
-) -> tuple[Int32Array, Int32Array, Int32Array]:
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int32Array]:
     r"""Build symmetric undirected CSR `(degree, offsets, adj)` arrays from edge lists `(q_indices, t_indices)`."""
     n_edges = len(q_indices)
     degree = np.zeros(n_seqs, dtype=np.int32)
@@ -606,13 +606,13 @@ def _build_undirected_adj(
     return degree, offsets, adj
 
 
-@njit(nogil=True, cache=True)
+@Types.njit
 def _cdhit_cluster(
     n_seqs: int,
-    order: Int32Array,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
-) -> tuple[Int32Array, Int32Array, Int32Array]:
+    order: Types.Int32Array,
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int32Array]:
     r"""Numba kernel for length-prioritized greedy incremental clustering (CD-HIT style)."""
     _, offsets, adj = _build_undirected_adj(n_seqs, q_indices, t_indices)
 
@@ -648,12 +648,12 @@ def _cdhit_cluster(
     return cluster_ids, reps_arr, sizes_arr
 
 
-@njit(nogil=True, cache=True)
+@Types.njit
 def _greedy_cover_cluster(
     n_seqs: int,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
-) -> tuple[Int32Array, Int32Array, Int32Array]:
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int32Array]:
     r"""Numba kernel for iterative maximum uncovered degree greedy set cover."""
     degree, offsets, adj = _build_undirected_adj(n_seqs, q_indices, t_indices)
 
@@ -708,14 +708,14 @@ def _greedy_cover_cluster(
     return cluster_ids, reps_arr, sizes_arr
 
 
-@njit(nogil=True, cache=True)
+@Types.njit
 def _upgma_component_kernel(
     m: int,
-    loc_u: np.ndarray,
-    loc_v: np.ndarray,
-    dists: np.ndarray,
+    loc_u: Types.Int32Array,
+    loc_v: Types.Int32Array,
+    dists: Types.Float64Array,
     cutoff: float,
-) -> np.ndarray:
+) -> Types.Int32Array:
     r"""Compiled UPGMA average-linkage clustering on a local component of size `m` up to `cutoff`."""
     d_mat = np.ones((m, m), dtype=np.float64)
     for i in range(m):
@@ -781,9 +781,11 @@ def _upgma_component_kernel(
 
 def _group_by_component(
     n_seqs: int,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
-) -> tuple[int, Int32Array, Int32Array, Int32Array, Int32Array, Int32Array, Int32Array]:
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
+) -> tuple[
+    int, Types.Int32Array, Types.Int32Array, Types.Int32Array, Types.Int32Array, Types.Int32Array, Types.Int32Array
+]:
     r"""Decompose edges into connected components and return sorted node/edge slice bounds per component."""
     n_comp, comp_labels = CSR.connected_components_from_edges(n_seqs, q_indices, t_indices)
     comp_ids = np.arange(n_comp)
@@ -801,10 +803,10 @@ def _group_by_component(
 
 
 def _select_longest_representatives(
-    cluster_ids: Int32Array,
-    lengths: Int32Array,
+    cluster_ids: Types.Int32Array,
+    lengths: Types.Int32Array,
     n_clusters: int,
-) -> tuple[Int32Array, Int32Array]:
+) -> tuple[Types.Int32Array, Types.Int32Array]:
     r"""Select the longest sequence in each cluster as its representative centroid."""
     reps = np.empty(n_clusters, dtype=np.int32)
     sizes = np.bincount(cluster_ids, minlength=n_clusters).astype(np.int32)
@@ -820,12 +822,12 @@ def _select_longest_representatives(
 
 def _upgma_cluster(
     n_seqs: int,
-    lengths: Int32Array,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
+    lengths: Types.Int32Array,
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
     pidents: np.ndarray[Any, np.dtype[np.floating[Any]]],
     min_identity: float,
-) -> tuple[Int32Array, Int32Array, Int32Array]:
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int32Array]:
     r"""Hierarchical average-linkage (UPGMA) clustering via compiled Numba kernels."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
@@ -876,10 +878,10 @@ def _upgma_cluster(
 
 def _connected_components_cluster(
     n_seqs: int,
-    lengths: Int32Array,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
-) -> tuple[Int32Array, Int32Array, Int32Array]:
+    lengths: Types.Int32Array,
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int32Array]:
     r"""Transitive closure connected components clustering via compiled Union-Find."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)
@@ -895,14 +897,14 @@ def _connected_components_cluster(
 
 def _mcl_cluster(
     n_seqs: int,
-    lengths: Int32Array,
-    q_indices: Int32Array,
-    t_indices: Int32Array,
+    lengths: Types.Int32Array,
+    q_indices: Types.Int32Array,
+    t_indices: Types.Int32Array,
     bitscores: np.ndarray[Any, np.dtype[np.floating[Any]]],
     inflation: float = 2.0,
     max_iter: int = 100,
     tol: float = 1e-5,
-) -> tuple[Int32Array, Int32Array, Int32Array]:
+) -> tuple[Types.Int32Array, Types.Int32Array, Types.Int32Array]:
     r"""Markov Cluster Algorithm (MCL) on length-normalized alignment bitscores per connected component."""
     if n_seqs <= 1:
         return np.zeros(n_seqs, dtype=np.int32), np.arange(n_seqs, dtype=np.int32), np.array([n_seqs], dtype=np.int32)

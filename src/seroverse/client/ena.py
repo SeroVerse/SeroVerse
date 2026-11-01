@@ -16,9 +16,30 @@ class ENASampleRecord:
     sample_accession: str = ""
     scientific_name: str = ""
     strain: str = ""
+    isolate: str = ""
+    culture_collection: str = ""
     serotype: str = ""
     serovar: str = ""
+    description: str = ""
     tax_id: str = ""
+
+    @property
+    def taxid_int(self) -> int:
+        """Numeric NCBI Taxonomy ID, or `0` if absent."""
+        s = self.tax_id.strip()
+        return int(s) if s.isdigit() else 0
+
+    @property
+    def strain_candidates(self) -> tuple[str, ...]:
+        """Ordered tuple of non-empty strain/isolate/culture-collection strings."""
+        return tuple(
+            dict.fromkeys(x.strip() for x in (self.strain, self.culture_collection, self.isolate) if x.strip())
+        )
+
+    @property
+    def serotype_candidates(self) -> tuple[str, ...]:
+        """Ordered tuple of non-empty serotype/serovar/description strings."""
+        return tuple(dict.fromkeys(x.strip() for x in (self.serotype, self.serovar, self.description) if x.strip()))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ENASampleRecord:
@@ -26,8 +47,11 @@ class ENASampleRecord:
             sample_accession=str(data.get("sample_accession") or ""),
             scientific_name=str(data.get("scientific_name") or ""),
             strain=str(data.get("strain") or ""),
+            isolate=str(data.get("isolate") or ""),
+            culture_collection=str(data.get("culture_collection") or ""),
             serotype=str(data.get("serotype") or ""),
             serovar=str(data.get("serovar") or ""),
+            description=str(data.get("description") or ""),
             tax_id=str(data.get("tax_id") or ""),
         )
 
